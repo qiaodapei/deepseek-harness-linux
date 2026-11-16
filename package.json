@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "DeepSeek Harness (dsh) local workspace: pinned CLI, version updates, and profile plugin management",
   "license": "MIT",
@@ -22,6 +22,7 @@
     "desktop": "electron desktop/main.mjs",
     "desktop:shortcut": "bash desktop/install-shortcut.sh",
     "appimage": "bash desktop/build-appimage.sh",
+    "test:updater": "node scripts/test-updater.mjs",
     "update": "npm install --save-dev --save-exact @deepseek-ai/dsh@next",
     "update:latest": "npm install --save-dev --save-exact @deepseek-ai/dsh@latest",
     "update:check": "npm view @deepseek-ai/dsh dist-tags --json",

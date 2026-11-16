@@ -56,7 +56,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          current="$(node -p "require('./package.json').devDependencies['@deepseek-ai/dsh']")"
+          current_dsh="$(node -p "require('./package.json').devDependencies['@deepseek-ai/dsh']")"
+          current_client="$(node -p "require('./package.json').version")"
           requested="${REQUESTED_VERSION:-}"
 
           if [[ -n "$requested" ]]; then
@@ -86,7 +87,27 @@ jobs:
             exit 1
           fi
 
-          tag="dsh-v$version"
+          if [[ "$current_dsh" == "$version" ]]; then
+            client_version="$current_client"
+            bump_client=false
+          else
+            client_version="$(
+              CURRENT_CLIENT="$current_client" node -e '
+                const base = process.env.CURRENT_CLIENT.split("+")[0].split("-")[0]
+                const parts = base.split(".").map(Number)
+                if (parts.length !== 3 || parts.some((part) => !Number.isInteger(part) || part < 0)) {
+                  console.error("invalid client version: " + process.env.CURRENT_CLIENT)
+                  process.exit(1)
+                }
+                parts[2] += 1
+                process.stdout.write(parts.join("."))
+              '
+            )"
+            bump_client=true
+          fi
+
+          tag="v$client_version"
+          upstream_tag="dsh-v$version"
           release_ready=false
           release_assets="$(
             gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
@@ -96,25 +117,38 @@ jobs:
             release_ready=true
           fi
 
-          if [[ "$current" == "$version" && "$release_ready" == "true" && "${FORCE:-false}" != "true" ]]; then
+          if [[ "$current_dsh" == "$version" && "$release_ready" == "true" && "${FORCE:-false}" != "true" ]]; then
             has_work=false
-            echo "Already at $version and $tag has an AppImage; nothing to do."
+            echo "Already at dsh $version with release $tag; nothing to do."
           else
             has_work=true
-            echo "Will build $version (current=$current, release_ready=$release_ready, force=${FORCE:-false})."
+            echo "Will build dsh $version as client $client_version (release_ready=$release_ready, force=${FORCE:-false})."
           fi
 
           {
-            echo "current=$current"
+            echo "current_dsh=$current_dsh"
+            echo "current_client=$current_client"
+            echo "client_version=$client_version"
+            echo "bump_client=$bump_client"
             echo "version=$version"
             echo "tag=$tag"
+            echo "upstream_tag=$upstream_tag"
             echo "has_work=$has_work"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Update version references
-        if: steps.detect.outputs.has_work == 'true' && steps.detect.outputs.current != steps.detect.outputs.version
+      - name: Bump client version
+        if: steps.detect.outputs.has_work == 'true' && steps.detect.outputs.bump_client == 'true'
         env:
-          CURRENT: ${{ steps.detect.outputs.current }}
+          CLIENT_VERSION: ${{ steps.detect.outputs.client_version }}
+        run: |
+          set -euo pipefail
+          npm version "$CLIENT_VERSION" --no-git-tag-version --allow-same-version
+          test "$(node -p "require('./package.json').version")" = "$CLIENT_VERSION"
+
+      - name: Update dsh version references
+        if: steps.detect.outputs.has_work == 'true' && steps.detect.outputs.current_dsh != steps.detect.outputs.version
+        env:
+          CURRENT: ${{ steps.detect.outputs.current_dsh }}
           VERSION: ${{ steps.detect.outputs.version }}
         run: node scripts/update-dsh-version.mjs "$CURRENT" "$VERSION"
 
@@ -122,9 +156,12 @@ jobs:
         if: steps.detect.outputs.has_work == 'true'
         env:
           VERSION: ${{ steps.detect.outputs.version }}
+          CLIENT_VERSION: ${{ steps.detect.outputs.client_version }}
         run: |
           set -euo pipefail
           npm install --no-audit --no-fund
+
+          test "$(node -p "require('./package.json').version")" = "$CLIENT_VERSION"
 
           installed="$(./bin/dsh --version)"
           echo "Installed dsh: $installed"
@@ -153,6 +190,7 @@ jobs:
         if: steps.detect.outputs.has_work == 'true'
         env:
           VERSION: ${{ steps.detect.outputs.version }}
+          CLIENT_VERSION: ${{ steps.detect.outputs.client_version }}
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -160,6 +198,8 @@ jobs:
 
           appimage="$(ls dist-desktop/*.AppImage)"
           chmod +x "$appimage"
+          test "$(basename "$appimage")" = "DeepSeek-Harness-${CLIENT_VERSION}-x86_64.AppImage"
+
           offset="$("$appimage" --appimage-offset)"
           embedded="$(
             unsquashfs -o "$offset" -cat "$appimage" \
@@ -172,17 +212,25 @@ jobs:
           ( cd dist-desktop && sha256sum "$(basename "$appimage")" > "$(basename "$appimage").sha256" )
           ls -lh "$appimage" "$appimage.sha256"
 
-      - name: Update README artifact size
+      - name: Update README artifact references
         if: steps.detect.outputs.has_work == 'true'
+        env:
+          CURRENT_CLIENT: ${{ steps.detect.outputs.current_client }}
+          CLIENT_VERSION: ${{ steps.detect.outputs.client_version }}
         run: |
           set -euo pipefail
+          if [[ "$CURRENT_CLIENT" != "$CLIENT_VERSION" ]]; then
+            sed -i -E "s/DeepSeek-Harness-[0-9]+\.[0-9]+\.[0-9]+/DeepSeek-Harness-${CLIENT_VERSION}/g" README.md
+          fi
           size_mb=$(( ($(stat -c%s dist-desktop/*.AppImage) + 1048575) / 1048576 ))
           sed -i -E "s/# 约 [0-9]+ MB/# 约 ${size_mb} MB/" README.md
+          grep -n "DeepSeek-Harness-${CLIENT_VERSION}" README.md | head -3
           grep -n "# 约 ${size_mb} MB" README.md
 
       - name: Commit version update
         if: steps.detect.outputs.has_work == 'true'
         env:
+          CLIENT_VERSION: ${{ steps.detect.outputs.client_version }}
           VERSION: ${{ steps.detect.outputs.version }}
         run: |
           set -euo pipefail
@@ -193,7 +241,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No source changes to commit."
           else
-            git commit -m "chore: update dsh to ${VERSION}"
+            git commit -m "chore: release ${CLIENT_VERSION} with dsh ${VERSION}"
             git fetch origin main
             git rebase origin/main
             git push origin HEAD:main
@@ -205,7 +253,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.detect.outputs.version }}
-          TAG: ${{ steps.detect.outputs.tag }}
+          CLIENT_VERSION: ${{ steps.detect.outputs.client_version }}
+          UPSTREAM_TAG: ${{ steps.detect.outputs.upstream_tag }}
         run: |
           set -euo pipefail
           notes="$RUNNER_TEMP/release-notes.md"
@@ -215,12 +264,12 @@ jobs:
           sha="$(cut -d' ' -f1 "$asset.sha256")"
           size="$(du -h "$asset" | cut -f1)"
 
-          if ! gh api "repos/deepseek-ai/deepseek-harness/releases/tags/${TAG}" --jq '.body' > "$upstream" 2>/dev/null; then
+          if ! gh api "repos/deepseek-ai/deepseek-harness/releases/tags/${UPSTREAM_TAG}" --jq '.body' > "$upstream" 2>/dev/null; then
             echo "无法获取上游 release notes。" > "$upstream"
           fi
 
           {
-            echo "DeepSeek Harness Linux 桌面客户端，内置 **dsh ${VERSION}**。"
+            echo "DeepSeek Harness Linux 桌面客户端 **v${CLIENT_VERSION}**，内置 **dsh ${VERSION}**。"
             echo
             echo "| 文件 | 大小 | SHA256 |"
             echo "| --- | --- | --- |"
@@ -233,7 +282,9 @@ jobs:
             echo
             echo "无 FUSE 环境：\`./${asset_name} --appimage-extract-and-run\`"
             echo
-            echo "上游 release：https://github.com/deepseek-ai/deepseek-harness/releases/tag/${TAG}"
+            echo "客户端会自动检查新版本；也可以在托盘菜单或 **帮助 → 检查更新** 中手动检查。"
+            echo
+            echo "上游 release：https://github.com/deepseek-ai/deepseek-harness/releases/tag/${UPSTREAM_TAG}"
             echo
             echo "---"
             echo
@@ -245,12 +296,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.detect.outputs.version }}
+          CLIENT_VERSION: ${{ steps.detect.outputs.client_version }}
           TAG: ${{ steps.detect.outputs.tag }}
         run: |
           set -euo pipefail
           asset="$(ls dist-desktop/*.AppImage)"
           notes="$RUNNER_TEMP/release-notes.md"
-          title="DeepSeek Harness Linux (dsh ${VERSION})"
+          title="DeepSeek Harness ${CLIENT_VERSION} (dsh ${VERSION})"
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$title" --notes-file "$notes"

@@ -8,12 +8,36 @@ import {
   dialog,
   screen,
   shell,
+  powerMonitor,
 } from 'electron'
 import { spawn } from 'node:child_process'
-import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  createWriteStream,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import {
+  DEFAULT_REPO,
+  compareVersions,
+  downloadAssetToFile,
+  ensureFreeSpace,
+  fetchAssetText,
+  fetchReleases,
+  formatBytes,
+  installAppImage,
+  isDirectoryWritable,
+  parseSha256,
+  readInstalledDshVersion,
+  readUpdateState,
+  selectLatestRelease,
+  writeUpdateState,
+} from './updater.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const runtimeDir = app.isPackaged ? join(process.resourcesPath, 'runtime') : ''
@@ -27,6 +51,20 @@ const trayIconFile = join(staticDir, 'assets', 'tray.png')
 const stateDir = join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'deepseek-harness')
 const serverLog = join(stateDir, 'server.log')
 const smokePath = process.env.DSH_DESKTOP_SMOKE || ''
+const updateRepo = process.env.DSH_UPDATE_REPO || DEFAULT_REPO
+const updateStateFile = join(stateDir, 'update-state.json')
+const updateCacheDir = join(stateDir, 'updates')
+const updateTokenFile = join(
+  process.env.XDG_CONFIG_HOME || join(homedir(), '.config'),
+  'deepseek-harness',
+  'github-token',
+)
+const updateCheckIntervalMs = 6 * 60 * 60 * 1000
+const updateCheckDelayMs = (() => {
+  const value = Number(process.env.DSH_UPDATE_CHECK_DELAY_MS)
+  return Number.isFinite(value) && value >= 0 ? value : 15_000
+})()
+const updateChecksDisabled = process.env.DSH_DISABLE_UPDATE_CHECK === '1'
 
 app.setName('DeepSeek Harness')
 app.commandLine.appendSwitch('class', 'deepseek-harness')
@@ -47,8 +85,615 @@ let cleanupDone = false
 let restarting = false
 let notifiedHidden = false
 
+let updateState = readUpdateState(updateStateFile)
+let updateStatus = {
+  phase: 'idle',
+  latest: null,
+  error: null,
+  progress: 0,
+  total: 0,
+}
+let updateTimer = null
+let checkPromise = null
+let downloadController = null
+let lastUpdateUiAt = 0
+let installedDshVersion = ''
+const activeNotifications = new Set()
+
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args)
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+function currentAppVersion() {
+  return process.env.DSH_UPDATE_CURRENT_VERSION || app.getVersion()
+}
+
+function getInstalledDshVersion() {
+  if (!installedDshVersion) {
+    installedDshVersion = readInstalledDshVersion(projectRoot, app.getVersion())
+  }
+  return installedDshVersion
+}
+
+function readUpdateToken() {
+  for (const name of ['DSH_UPDATE_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN']) {
+    const value = process.env[name]
+    if (value && value.trim()) return value.trim()
+  }
+  try {
+    return readFileSync(updateTokenFile, 'utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
+function autoCheckEnabled() {
+  return !updateChecksDisabled && updateState.autoCheck !== false
+}
+
+let persistQueue = Promise.resolve()
+function persistUpdateState() {
+  const snapshot = JSON.parse(JSON.stringify(updateState))
+  persistQueue = persistQueue
+    .catch(() => {})
+    .then(() => writeUpdateState(updateStateFile, snapshot))
+    .catch((error) => log('failed to save update state:', error.message))
+  return persistQueue
+}
+
+function cacheRelease(release) {
+  if (!release) return null
+  return {
+    ...release,
+    notes: String(release.notes || '').slice(0, 4000),
+  }
+}
+
+function setUpdateStatus(patch) {
+  updateStatus = { ...updateStatus, ...patch }
+  refreshMenus()
+}
+
+function reportUpdateProgress(received, total) {
+  updateStatus.progress = received
+  if (total > 0) updateStatus.total = total
+  const now = Date.now()
+  if (now - lastUpdateUiAt >= 500) {
+    lastUpdateUiAt = now
+    refreshMenus()
+  }
+}
+
+function releaseDshVersion(release) {
+  const text = `${release?.name || ''}\n${release?.notes || ''}`
+  const match = /(?:内置\s*)?\*{0,2}dsh\s+([0-9][0-9A-Za-z.+-]*)/i.exec(text)
+  return match ? match[1] : ''
+}
+
+function plainNotes(notes) {
+  let text = String(notes || '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/`{1,3}/g, '')
+    .replace(/\r/g, '')
+    .trim()
+  if (text.length > 1800) text = `${text.slice(0, 1800)}…`
+  return text || '（无更新说明）'
+}
+
+function showMessageBox(options) {
+  if (win && !win.isDestroyed()) return dialog.showMessageBox(win, options)
+  return dialog.showMessageBox(options)
+}
+
+function notify(title, body, onClick) {
+  if (!Notification.isSupported()) return
+  try {
+    const notification = new Notification({
+      title,
+      body,
+      icon: nativeImage.createFromPath(iconFile),
+    })
+    activeNotifications.add(notification)
+    notification.on('close', () => activeNotifications.delete(notification))
+    if (onClick) {
+      notification.on('click', () => {
+        activeNotifications.delete(notification)
+        onClick()
+      })
+    }
+    notification.show()
+  } catch (error) {
+    log('notification failed:', error.message)
+  }
+}
+
+function updateEntryLabel() {
+  const { phase, latest, progress, total } = updateStatus
+  if (phase === 'checking') return '正在检查更新…'
+  if (phase === 'downloading') {
+    if (total > 0) return `正在下载更新… ${Math.floor((progress / total) * 100)}%`
+    return `正在下载更新… ${formatBytes(progress)}`
+  }
+  if (phase === 'installing') return '正在安装更新…'
+  if (phase === 'available' && latest) return `安装更新 v${latest.version}…`
+  if (phase === 'error') return '重新检查更新…'
+  return '检查更新…'
+}
+
+function updateMenuTemplate() {
+  const { phase } = updateStatus
+  const items = [
+    {
+      label: updateEntryLabel(),
+      enabled: !['checking', 'installing', 'downloading'].includes(phase),
+      click: () => {
+        if (phase === 'available') showUpdateAvailableDialog()
+        else if (!['checking', 'installing', 'downloading'].includes(phase)) {
+          checkForUpdates({ manual: true, force: true })
+        }
+      },
+    },
+  ]
+  if (phase === 'downloading') {
+    items.push({ label: '取消下载', click: cancelUpdateDownload })
+  }
+  return items
+}
+
+function autoCheckMenuItem() {
+  return {
+    label: '自动检查更新',
+    type: 'checkbox',
+    checked: autoCheckEnabled(),
+    enabled: !updateChecksDisabled,
+    click: (item) => toggleAutoCheck(item.checked),
+  }
+}
+
+async function toggleAutoCheck(checked) {
+  updateState.autoCheck = Boolean(checked)
+  await persistUpdateState()
+  scheduleUpdateChecks()
+  refreshMenus()
+  if (checked) checkForUpdates({ automatic: true, force: true })
+}
+
+function updateTrayTooltip() {
+  if (!tray || tray.isDestroyed()) return
+  let text = `DeepSeek Harness — dsh ${getInstalledDshVersion()}`
+  if (updateStatus.phase === 'available' && updateStatus.latest) {
+    text += ` — 可更新到 v${updateStatus.latest.version}`
+  } else if (updateStatus.phase === 'downloading') {
+    text += ' — 正在下载更新'
+  } else if (updateStatus.phase === 'installing') {
+    text += ' — 正在安装更新'
+  }
+  tray.setToolTip(text)
+}
+
+function updateProgressBar() {
+  if (!win || win.isDestroyed()) return
+  if (updateStatus.phase === 'downloading') {
+    const { progress, total } = updateStatus
+    win.setProgressBar(total > 0 ? Math.max(0.01, Math.min(1, progress / total)) : 2)
+  } else if (updateStatus.phase === 'installing') {
+    win.setProgressBar(1)
+  } else {
+    win.setProgressBar(-1)
+  }
+}
+
+function refreshMenus() {
+  if (!app.isReady()) return
+  buildMenu()
+  if (tray && !tray.isDestroyed()) {
+    tray.setContextMenu(Menu.buildFromTemplate(trayMenuTemplate()))
+  }
+  updateTrayTooltip()
+  updateProgressBar()
+}
+
+async function checkForUpdates({ manual = false, force = false } = {}) {
+  if (updateStatus.phase === 'downloading' || updateStatus.phase === 'installing') {
+    if (manual) {
+      await showMessageBox({
+        type: 'info',
+        title: '更新正在进行中',
+        message: '请等待当前更新完成。',
+        buttons: ['确定'],
+      })
+    }
+    return null
+  }
+  if (checkPromise) return checkPromise
+  if (!manual && !autoCheckEnabled()) return null
+  if (!manual && !force && Date.now() - updateState.lastAttempt < updateCheckIntervalMs) {
+    return null
+  }
+
+  setUpdateStatus({ phase: 'checking', error: null })
+  updateState.lastAttempt = Date.now()
+  await persistUpdateState()
+
+  checkPromise = (async () => {
+    const token = readUpdateToken()
+    const current = currentAppVersion()
+    try {
+      const result = await fetchReleases({
+        repo: updateRepo,
+        token,
+        etag: manual || force ? '' : updateState.etag || '',
+      })
+
+      let latest = null
+      if (result.notModified) {
+        latest =
+          updateState.latest && compareVersions(updateState.latest.version, current) > 0
+            ? updateState.latest
+            : null
+      } else {
+        updateState.etag = result.etag || ''
+        updateState.latest = cacheRelease(selectLatestRelease(result.releases, '0.0.0'))
+        latest = selectLatestRelease(result.releases, current)
+      }
+
+      updateState.lastCheck = Date.now()
+      await persistUpdateState()
+
+      log(
+        'update check:',
+        `current=v${current}`,
+        latest ? `available=v${latest.version}` : 'up-to-date',
+      )
+
+      if (latest) {
+        setUpdateStatus({ phase: 'available', latest, error: null })
+        if (manual) {
+          await showUpdateAvailableDialog()
+        } else if (updateState.notifiedVersion !== latest.version) {
+          updateState.notifiedVersion = latest.version
+          await persistUpdateState()
+          notify(
+            '发现 DeepSeek Harness 更新',
+            `v${latest.version} 可用，当前为 v${current}。点击查看并安装。`,
+            () => {
+              showWindow()
+              showUpdateAvailableDialog()
+            },
+          )
+        }
+        return latest
+      }
+
+      setUpdateStatus({ phase: 'idle', latest: null, error: null })
+      if (manual) await showUpToDateDialog()
+      return null
+    } catch (error) {
+      log('update check failed:', error.message)
+      let cached = null
+      try {
+        if (updateState.latest && compareVersions(updateState.latest.version, current) > 0) {
+          cached = updateState.latest
+        }
+      } catch {}
+      setUpdateStatus({ phase: 'error', latest: cached, error: error.message })
+      if (manual) await showUpdateErrorDialog(error)
+      return null
+    }
+  })()
+
+  try {
+    return await checkPromise
+  } finally {
+    checkPromise = null
+  }
+}
+
+async function showUpdateAvailableDialog() {
+  const latest = updateStatus.latest
+  if (!latest) return
+  showWindow()
+
+  const current = currentAppVersion()
+  const currentDsh = getInstalledDshVersion()
+  const nextDsh = releaseDshVersion(latest)
+  const size = latest.appImage.size ? formatBytes(latest.appImage.size) : '未知大小'
+  const lines = [
+    `当前版本：${current}（内置 dsh ${currentDsh}）`,
+    `新版本：${latest.version}${nextDsh ? `（内置 dsh ${nextDsh}）` : ''}`,
+    `更新包：${latest.appImage.name}（${size}）`,
+  ]
+  if (latest.publishedAt) {
+    lines.push(`发布日期：${new Date(latest.publishedAt).toLocaleString()}`)
+  }
+  lines.push('', '更新说明：', plainNotes(latest.notes))
+
+  const { response } = await showMessageBox({
+    type: 'info',
+    title: '发现新版本',
+    message: `DeepSeek Harness ${latest.version} 可用`,
+    detail: lines.join('\n'),
+    buttons: ['下载并安装', '稍后', '查看发布说明'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  })
+
+  if (response === 0) await downloadAndInstallUpdate()
+  else if (response === 2) shell.openExternal(latest.url)
+}
+
+async function showUpToDateDialog() {
+  const current = currentAppVersion()
+  let latestVersion = current
+  try {
+    if (updateState.latest && compareVersions(updateState.latest.version, current) === 0) {
+      latestVersion = updateState.latest.version
+    }
+  } catch {}
+
+  const { response } = await showMessageBox({
+    type: 'info',
+    title: '检查更新',
+    message: '当前已是最新版本',
+    detail: [
+      `当前版本：${current}`,
+      `内置 dsh：${getInstalledDshVersion()}`,
+      `最新版本：${latestVersion}`,
+      `更新源：https://github.com/${updateRepo}/releases`,
+    ].join('\n'),
+    buttons: ['确定', '打开 Release 页面'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  })
+  if (response === 1) shell.openExternal(`https://github.com/${updateRepo}/releases`)
+}
+
+async function showUpdateErrorDialog(error) {
+  const token = readUpdateToken()
+  const detail = [
+    String(error?.message || error),
+    '',
+    `更新源：https://github.com/${updateRepo}/releases`,
+    token
+      ? '已读取 GitHub token。'
+      : `未配置 GitHub token。如果仓库是私有的，请把只读 token 保存到：\n${updateTokenFile}`,
+  ].join('\n')
+
+  const { response } = await showMessageBox({
+    type: 'error',
+    title: '检查更新失败',
+    message: '无法检查更新',
+    detail,
+    buttons: ['重试', '打开 Release 页面', '关闭'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  })
+  if (response === 0) checkForUpdates({ manual: true, force: true })
+  else if (response === 1) shell.openExternal(`https://github.com/${updateRepo}/releases`)
+}
+
+async function showDownloadedDialog(release, path) {
+  const mode = app.isPackaged ? '当前 AppImage 所在目录不可写' : '当前是开发模式（npm run desktop）'
+  const { response } = await showMessageBox({
+    type: 'info',
+    title: '更新已下载',
+    message: `DeepSeek Harness ${release.version} 已下载`,
+    detail: [
+      `文件：${path}`,
+      `${mode}，无法自动替换正在运行的客户端。`,
+      '退出客户端后，用这个文件替换原来的 AppImage 即可。',
+    ].join('\n'),
+    buttons: ['打开所在文件夹', '查看发布说明', '关闭'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  })
+  if (response === 0) shell.showItemInFolder(path)
+  else if (response === 1) shell.openExternal(release.url)
+}
+
+async function showDownloadErrorDialog(error, path) {
+  const latest = updateStatus.latest
+  const detail = [
+    String(error?.message || error),
+    path ? `文件：${path}` : '',
+    '',
+    latest ? `发布页面：${latest.url}` : `https://github.com/${updateRepo}/releases`,
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  const { response } = await showMessageBox({
+    type: 'error',
+    title: '更新失败',
+    message: '无法下载或安装更新',
+    detail,
+    buttons: ['重试', '打开 Release 页面', '关闭'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  })
+  if (response === 0) downloadAndInstallUpdate()
+  else if (response === 1) {
+    shell.openExternal(latest?.url || `https://github.com/${updateRepo}/releases`)
+  }
+}
+
+function cancelUpdateDownload() {
+  if (downloadController) downloadController.abort()
+}
+
+async function downloadAndInstallUpdate() {
+  const latest = updateStatus.latest
+  if (!latest || downloadController) return
+
+  if (compareVersions(latest.version, currentAppVersion()) <= 0) {
+    setUpdateStatus({ phase: 'idle', latest: null, progress: 0, total: 0 })
+    await showMessageBox({
+      type: 'info',
+      title: '无需更新',
+      message: '当前已是最新版本。',
+      buttons: ['确定'],
+    })
+    return
+  }
+
+  if (!latest.shaAsset) {
+    await showMessageBox({
+      type: 'error',
+      title: '更新失败',
+      message: '该 Release 缺少 SHA256 校验文件，已中止下载。',
+      detail: latest.url,
+      buttons: ['确定'],
+    })
+    return
+  }
+
+  const token = readUpdateToken()
+  const appImagePath = process.env.APPIMAGE || ''
+  const canInstall = Boolean(
+    app.isPackaged && appImagePath && (await isDirectoryWritable(dirname(appImagePath))),
+  )
+  const destination = canInstall
+    ? join(dirname(appImagePath), `.${basename(appImagePath)}.update`)
+    : join(updateCacheDir, latest.appImage.name)
+
+  const controller = new AbortController()
+  downloadController = controller
+  lastUpdateUiAt = 0
+  setUpdateStatus({
+    phase: 'downloading',
+    latest,
+    error: null,
+    progress: 0,
+    total: latest.appImage.size || 0,
+  })
+
+  try {
+    const shaText = await fetchAssetText(latest.shaAsset, {
+      token,
+      signal: controller.signal,
+    })
+    const expectedSha256 = parseSha256(shaText)
+    if (!expectedSha256) {
+      throw new Error('更新包的 SHA256 校验文件格式无效。')
+    }
+
+    if (latest.appImage.size) {
+      await ensureFreeSpace(dirname(destination), latest.appImage.size)
+    }
+
+    const result = await downloadAssetToFile(latest.appImage, destination, {
+      token,
+      expectedSha256,
+      signal: controller.signal,
+      onProgress: reportUpdateProgress,
+    })
+    log(
+      'update downloaded:',
+      latest.version,
+      formatBytes(result.size),
+      `sha256=${result.sha256}`,
+    )
+
+    if (!canInstall) {
+      setUpdateStatus({ phase: 'available', latest, progress: 0, total: 0 })
+      await showDownloadedDialog(latest, destination)
+      return
+    }
+
+    setUpdateStatus({ phase: 'installing', latest, progress: 1, total: 1 })
+    await installAppImage({ source: destination, target: appImagePath })
+    log('update installed:', latest.version, '->', appImagePath)
+
+    updateState.installedVersion = latest.version
+    updateState.latest = null
+    await persistUpdateState()
+    notify('更新已安装', `正在重启到 DeepSeek Harness ${latest.version}…`)
+    await relaunchAppImage(appImagePath)
+  } catch (error) {
+    const aborted = error?.code === 'aborted' || error?.name === 'AbortError'
+    log('update failed:', error.message)
+    if (aborted) {
+      setUpdateStatus({ phase: 'available', latest, progress: 0, total: 0, error: null })
+      notify('更新已取消', '下载已停止。', () => {
+        showWindow()
+        showUpdateAvailableDialog()
+      })
+    } else {
+      setUpdateStatus({ phase: 'error', latest, progress: 0, total: 0, error: error.message })
+      await showDownloadErrorDialog(error, destination)
+    }
+  } finally {
+    if (downloadController === controller) downloadController = null
+  }
+}
+
+async function relaunchAppImage(target) {
+  quitting = true
+  try {
+    await stopServer()
+  } catch (error) {
+    log('failed to stop server before restart:', error.message)
+  }
+  cleanupDone = true
+  const args = process.argv
+    .slice(1)
+    .filter((arg) => arg !== app.getAppPath() && !arg.endsWith('desktop/main.mjs'))
+  app.relaunch({ execPath: target, args })
+  app.quit()
+}
+
+function cleanupStaleUpdateFiles() {
+  try {
+    mkdirSync(updateCacheDir, { recursive: true })
+    for (const name of readdirSync(updateCacheDir)) {
+      if (name.endsWith('.part')) rmSync(join(updateCacheDir, name), { force: true })
+    }
+  } catch {}
+  if (!process.env.APPIMAGE) return
+  const target = process.env.APPIMAGE
+  try {
+    rmSync(`${join(dirname(target), `.${basename(target)}.update`)}.part`, { force: true })
+  } catch {}
+}
+
+function hydrateCachedUpdate() {
+  const cached = updateState.latest
+  if (!cached || !cached.version || !cached.appImage?.url || !cached.shaAsset?.url) return
+  try {
+    if (compareVersions(cached.version, currentAppVersion()) > 0) {
+      updateStatus = { ...updateStatus, phase: 'available', latest: cached }
+    }
+  } catch {}
+}
+
+function scheduleUpdateChecks() {
+  if (updateTimer) {
+    clearInterval(updateTimer)
+    updateTimer = null
+  }
+  if (!autoCheckEnabled() || smokePath) return
+  updateTimer = setInterval(() => {
+    checkForUpdates({ automatic: true })
+  }, updateCheckIntervalMs)
+  updateTimer.unref?.()
+}
+
+function startAutoUpdateChecks() {
+  if (smokePath || !autoCheckEnabled()) return
+  scheduleUpdateChecks()
+  const timer = setTimeout(() => {
+    checkForUpdates({ automatic: true })
+  }, Math.max(1000, updateCheckDelayMs))
+  timer.unref?.()
+  powerMonitor.on('resume', () => checkForUpdates({ automatic: true }))
+}
 
 function tailServerLog(lines = 30) {
   try {
@@ -325,21 +970,24 @@ function createWindow() {
   win.loadURL(pathToFileURL(splashFile).href)
 }
 
+function trayMenuTemplate() {
+  return [
+    { label: '打开主窗口', click: showWindow },
+    { label: '在浏览器中打开', click: openInBrowser },
+    { type: 'separator' },
+    ...updateMenuTemplate(),
+    { type: 'separator' },
+    { label: '重启服务', click: () => restartServer() },
+    { label: '关于', click: showAbout },
+    { label: '退出', click: quitApp },
+  ]
+}
+
 function createTray() {
   const image = nativeImage.createFromPath(trayIconFile)
   tray = new Tray(image)
   tray.setToolTip('DeepSeek Harness')
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: '打开主窗口', click: showWindow },
-      { label: '在浏览器中打开', click: openInBrowser },
-      { type: 'separator' },
-      { label: '重启服务', click: () => restartServer() },
-      { type: 'separator' },
-      { label: '关于', click: showAbout },
-      { label: '退出', click: quitApp },
-    ]),
-  )
+  tray.setContextMenu(Menu.buildFromTemplate(trayMenuTemplate()))
   tray.on('click', showWindow)
   tray.on('double-click', showWindow)
   log('tray created')
@@ -372,19 +1020,31 @@ function buildMenu() {
     },
     {
       label: '帮助',
-      submenu: [{ label: '关于 DeepSeek Harness', click: showAbout }],
+      submenu: [
+        ...updateMenuTemplate(),
+        { type: 'separator' },
+        autoCheckMenuItem(),
+        { type: 'separator' },
+        { label: '关于 DeepSeek Harness', click: showAbout },
+      ],
     },
   ]
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
 function showAbout() {
+  const lastCheck = updateState.lastCheck
+    ? new Date(updateState.lastCheck).toLocaleString()
+    : '尚未检查'
   const options = {
     type: 'info',
     title: 'About DeepSeek Harness',
     message: 'DeepSeek Harness Desktop',
     detail: [
       `Shell version: ${app.getVersion()}`,
+      `dsh version: ${getInstalledDshVersion()}`,
+      `Update source: ${updateRepo}`,
+      `Last update check: ${lastCheck}`,
       `Project: ${projectRoot}`,
       `Server: ${serverUrl || '(not running)'}`,
       `Server log: ${serverLog}`,
@@ -427,6 +1087,7 @@ async function boot() {
   try {
     await loadApp()
     if (smokePath) await runSmoke()
+    else startAutoUpdateChecks()
   } catch (error) {
     log('boot failed:', error)
     if (smokePath) {
@@ -503,9 +1164,12 @@ if (!gotLock) {
 } else {
   app.on('second-instance', showWindow)
   app.whenReady().then(async () => {
+    cleanupStaleUpdateFiles()
+    hydrateCachedUpdate()
     buildMenu()
     createTray()
     createWindow()
+    refreshMenus()
     await boot()
   })
 }

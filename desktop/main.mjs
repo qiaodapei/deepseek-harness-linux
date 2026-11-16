@@ -296,6 +296,7 @@ function refreshMenus() {
 }
 
 async function checkForUpdates({ manual = false, force = false } = {}) {
+  if (manual) showWindow()
   if (updateStatus.phase === 'downloading' || updateStatus.phase === 'installing') {
     if (manual) {
       await showMessageBox({
@@ -426,6 +427,7 @@ async function showUpdateAvailableDialog() {
 }
 
 async function showUpToDateDialog() {
+  showWindow()
   const current = currentAppVersion()
   let latestVersion = current
   try {
@@ -453,6 +455,7 @@ async function showUpToDateDialog() {
 }
 
 async function showUpdateErrorDialog(error) {
+  showWindow()
   const token = readUpdateToken()
   const detail = [
     String(error?.message || error),
@@ -478,6 +481,7 @@ async function showUpdateErrorDialog(error) {
 }
 
 async function showDownloadedDialog(release, path) {
+  showWindow()
   const mode = app.isPackaged ? '当前 AppImage 所在目录不可写' : '当前是开发模式（npm run desktop）'
   const { response } = await showMessageBox({
     type: 'info',
@@ -498,6 +502,7 @@ async function showDownloadedDialog(release, path) {
 }
 
 async function showDownloadErrorDialog(error, path) {
+  showWindow()
   const latest = updateStatus.latest
   const detail = [
     String(error?.message || error),

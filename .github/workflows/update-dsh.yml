@@ -67,7 +67,7 @@ jobs:
             latest_tag="$(
               gh api --paginate 'repos/deepseek-ai/deepseek-harness/releases?per_page=100' \
                 --jq '.[] | select(.draft == false and (.tag_name | startswith("dsh-v"))) | "\(.published_at)\t\(.tag_name)"' \
-                | sort -r | head -1 | cut -f2
+                | sort -r | awk -F '\t' 'NR == 1 { print $2 }'
             )"
             if [[ -z "$latest_tag" ]]; then
               echo "::error::No dsh-v* release found in deepseek-ai/deepseek-harness"
@@ -88,8 +88,11 @@ jobs:
 
           tag="dsh-v$version"
           release_ready=false
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets[].name' 2>/dev/null | grep -q '\.AppImage$'; then
+          release_assets="$(
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+              --jq '.assets[].name' 2>/dev/null || true
+          )"
+          if grep -q '\.AppImage$' <<< "$release_assets"; then
             release_ready=true
           fi
 
@@ -133,9 +136,10 @@ jobs:
           npm install-scripts ls --json > "$RUNNER_TEMP/install-scripts.json"
           node -e '
             const data = require(process.env.RUNNER_TEMP + "/install-scripts.json")
-            if (data.allowScripts.length > 0) {
+            const pending = data.allowScripts || []
+            if (pending.length > 0) {
               console.error("Unreviewed install scripts:")
-              for (const item of data.allowScripts) console.error("  " + item)
+              for (const item of pending) console.error("  " + item)
               console.error("Approve them locally and commit package.json, then rerun.")
               process.exit(1)
             }

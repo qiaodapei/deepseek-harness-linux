@@ -124,7 +124,8 @@ chmod +x dist-desktop/DeepSeek-Harness-1.0.0-x86_64.AppImage
   ```bash
   ./DeepSeek-Harness-1.0.0-x86_64.AppImage --appimage-extract-and-run
   ```
-- AppImage 自带 Node、dsh、pnpm，但不自带 glibc；目标系统需与构建机（Ubuntu 26.04，glibc 2.43）兼容。
+- AppImage 自带 Node、dsh、pnpm，但不自带 glibc。本地构建使用当前系统（Ubuntu 26.04，glibc 2.43）；
+  GitHub Actions 使用 Ubuntu 24.04（glibc 2.39）。目标系统的 glibc 不能低于构建机。
 - 本机 AppArmor 限制下 AppImage 会自动使用 `--no-sandbox`（AppRun 检测 + desktop 入口参数）。
 - AppImage **不会自动更新**。升级 dsh 或插件后需要重新执行 `npm run appimage` 生成新包；新包仍使用
   同一份 `~/.dsh` 用户数据。
@@ -152,6 +153,33 @@ npm run update:latest        # 升级到 npm latest（当前仍为 0.2.2-rc.1）
   ```
 - 升级 dsh 后，已装插件也要匹配新版本（见下一节），dsh 启动时会做兼容性检查。
 - 如果使用 AppImage，升级后需要重新执行 `npm run appimage` 生成新包（AppImage 不会自动更新）。
+
+## GitHub Actions 自动更新与发布
+
+[`.github/workflows/update-dsh.yml`](.github/workflows/update-dsh.yml) 每 6 小时检查一次
+[`deepseek-ai/deepseek-harness`](https://github.com/deepseek-ai/deepseek-harness) 的
+`dsh-v*` release，并在发现新版本时自动：
+
+1. 确认 npm 上存在对应版本的 `@deepseek-ai/dsh`；
+2. 更新 `package.json`、`package-lock.json` 和 README 中的版本号；
+3. 重新安装依赖并执行 `npm run appimage`；
+4. 校验 AppImage 内置的 dsh 版本，计算 SHA256；
+5. 提交变更并推送 `main`；
+6. 创建或更新标签为 `dsh-v<version>` 的 GitHub Release，上传 AppImage 和 `.sha256`。
+
+也可以在 Actions 页面手动触发 **Update dsh and release AppImage**：
+
+- `version` 留空：自动选择官方最新 release；
+- 指定 `version`：构建并发布指定版本，例如 `0.2.2-rc.3`；
+- `force`：即使版本未变化也重新构建，并覆盖已有 Release 附件。
+
+注意事项：
+
+- 工作流使用 `GITHUB_TOKEN`，需要 `contents: write` 权限（已在工作流中声明）。
+- 如果新版本引入了未审核的 npm 安装脚本，工作流会失败。此时在本地执行
+  `npm install-scripts approve <pkg>`，提交 `package.json` 后重新触发。
+- 自动构建运行在 `ubuntu-24.04`，产物体积较大（当前约 355 MB），Release 附件上限为 2 GiB。
+- 自动提交作者为 `github-actions[bot]`，提交信息格式为 `chore: update dsh to <version>`。
 
 ## 插件管理
 

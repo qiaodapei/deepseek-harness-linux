@@ -1,0 +1,259 @@
+name: Update dsh and release AppImage
+
+on:
+  schedule:
+    # Every 6 hours. GitHub may delay scheduled runs at busy times.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'dsh version (empty = latest official deepseek-harness release)'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuild and overwrite the release even if the version is unchanged'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-dsh
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Detect latest official dsh release
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          current="$(node -p "require('./package.json').devDependencies['@deepseek-ai/dsh']")"
+          requested="${REQUESTED_VERSION:-}"
+
+          if [[ -n "$requested" ]]; then
+            version="${requested#dsh-v}"
+            version="${version#v}"
+            echo "Using requested version: $version"
+          else
+            latest_tag="$(
+              gh api --paginate 'repos/deepseek-ai/deepseek-harness/releases?per_page=100' \
+                --jq '.[] | select(.draft == false and (.tag_name | startswith("dsh-v"))) | "\(.published_at)\t\(.tag_name)"' \
+                | sort -r | head -1 | cut -f2
+            )"
+            if [[ -z "$latest_tag" ]]; then
+              echo "::error::No dsh-v* release found in deepseek-ai/deepseek-harness"
+              exit 1
+            fi
+            version="${latest_tag#dsh-v}"
+          fi
+
+          if [[ ! "$version" =~ ^[0-9A-Za-z.+-]+$ ]]; then
+            echo "::error::Invalid dsh version: $version"
+            exit 1
+          fi
+
+          if ! npm view "@deepseek-ai/dsh@$version" version >/dev/null 2>&1; then
+            echo "::error::@deepseek-ai/dsh@$version is not available on npm"
+            exit 1
+          fi
+
+          tag="dsh-v$version"
+          release_ready=false
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' 2>/dev/null | grep -q '\.AppImage$'; then
+            release_ready=true
+          fi
+
+          if [[ "$current" == "$version" && "$release_ready" == "true" && "${FORCE:-false}" != "true" ]]; then
+            has_work=false
+            echo "Already at $version and $tag has an AppImage; nothing to do."
+          else
+            has_work=true
+            echo "Will build $version (current=$current, release_ready=$release_ready, force=${FORCE:-false})."
+          fi
+
+          {
+            echo "current=$current"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "has_work=$has_work"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update version references
+        if: steps.detect.outputs.has_work == 'true' && steps.detect.outputs.current != steps.detect.outputs.version
+        env:
+          CURRENT: ${{ steps.detect.outputs.current }}
+          VERSION: ${{ steps.detect.outputs.version }}
+        run: node scripts/update-dsh-version.mjs "$CURRENT" "$VERSION"
+
+      - name: Install dependencies
+        if: steps.detect.outputs.has_work == 'true'
+        env:
+          VERSION: ${{ steps.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund
+
+          installed="$(./bin/dsh --version)"
+          echo "Installed dsh: $installed"
+          test "$installed" = "$VERSION"
+
+          locked="$(node -p "require('./package-lock.json').packages['node_modules/@deepseek-ai/dsh'].version")"
+          test "$locked" = "$VERSION"
+
+          npm install-scripts ls --json > "$RUNNER_TEMP/install-scripts.json"
+          node -e '
+            const data = require(process.env.RUNNER_TEMP + "/install-scripts.json")
+            if (data.allowScripts.length > 0) {
+              console.error("Unreviewed install scripts:")
+              for (const item of data.allowScripts) console.error("  " + item)
+              console.error("Approve them locally and commit package.json, then rerun.")
+              process.exit(1)
+            }
+          '
+
+      - name: Build AppImage
+        if: steps.detect.outputs.has_work == 'true'
+        run: npm run appimage
+
+      - name: Verify AppImage
+        if: steps.detect.outputs.has_work == 'true'
+        env:
+          VERSION: ${{ steps.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq squashfs-tools
+
+          appimage="$(ls dist-desktop/*.AppImage)"
+          chmod +x "$appimage"
+          offset="$("$appimage" --appimage-offset)"
+          embedded="$(
+            unsquashfs -o "$offset" -cat "$appimage" \
+              resources/runtime/app/node_modules/@deepseek-ai/dsh/package.json \
+              | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version"
+          )"
+          echo "Embedded dsh: $embedded"
+          test "$embedded" = "$VERSION"
+
+          ( cd dist-desktop && sha256sum "$(basename "$appimage")" > "$(basename "$appimage").sha256" )
+          ls -lh "$appimage" "$appimage.sha256"
+
+      - name: Update README artifact size
+        if: steps.detect.outputs.has_work == 'true'
+        run: |
+          set -euo pipefail
+          size_mb=$(( ($(stat -c%s dist-desktop/*.AppImage) + 1048575) / 1048576 ))
+          sed -i -E "s/# 约 [0-9]+ MB/# 约 ${size_mb} MB/" README.md
+          grep -n "# 约 ${size_mb} MB" README.md
+
+      - name: Commit version update
+        if: steps.detect.outputs.has_work == 'true'
+        env:
+          VERSION: ${{ steps.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json README.md desktop/prepare-runtime.sh
+
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+          else
+            git commit -m "chore: update dsh to ${VERSION}"
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
+            echo "Pushed update commit."
+          fi
+
+      - name: Prepare release notes
+        if: steps.detect.outputs.has_work == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.detect.outputs.version }}
+          TAG: ${{ steps.detect.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          upstream="$RUNNER_TEMP/upstream-notes.md"
+          asset="$(ls dist-desktop/*.AppImage)"
+          asset_name="$(basename "$asset")"
+          sha="$(cut -d' ' -f1 "$asset.sha256")"
+          size="$(du -h "$asset" | cut -f1)"
+
+          if ! gh api "repos/deepseek-ai/deepseek-harness/releases/tags/${TAG}" --jq '.body' > "$upstream" 2>/dev/null; then
+            echo "无法获取上游 release notes。" > "$upstream"
+          fi
+
+          {
+            echo "DeepSeek Harness Linux 桌面客户端，内置 **dsh ${VERSION}**。"
+            echo
+            echo "| 文件 | 大小 | SHA256 |"
+            echo "| --- | --- | --- |"
+            echo "| \`${asset_name}\` | ${size} | \`${sha}\` |"
+            echo
+            echo '```bash'
+            echo "chmod +x ${asset_name}"
+            echo "./${asset_name}"
+            echo '```'
+            echo
+            echo "无 FUSE 环境：\`./${asset_name} --appimage-extract-and-run\`"
+            echo
+            echo "上游 release：https://github.com/deepseek-ai/deepseek-harness/releases/tag/${TAG}"
+            echo
+            echo "---"
+            echo
+            cat "$upstream"
+          } > "$notes"
+
+      - name: Publish GitHub release
+        if: steps.detect.outputs.has_work == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.detect.outputs.version }}
+          TAG: ${{ steps.detect.outputs.tag }}
+        run: |
+          set -euo pipefail
+          asset="$(ls dist-desktop/*.AppImage)"
+          notes="$RUNNER_TEMP/release-notes.md"
+          title="DeepSeek Harness Linux (dsh ${VERSION})"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$title" --notes-file "$notes"
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "$asset" "$asset.sha256" --clobber
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --notes-file "$notes" --target main "$asset" "$asset.sha256"
+          fi
+
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json url,tagName,assets \
+            --jq '{url, tagName, assets: [.assets[].name]}'

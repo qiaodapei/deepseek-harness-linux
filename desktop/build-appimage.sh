@@ -7,6 +7,6 @@ cd "$root"
 
 bash desktop/prepare-runtime.sh
 
-export PATH="$root/node_modules/.bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+export PATH="$root/node_modules/.bin:${PATH:-}:/usr/local/bin:/usr/bin:/bin"
 exec electron-builder --linux AppImage --x64 \
   --config desktop/electron-builder.config.mjs "$@"

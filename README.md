@@ -173,6 +173,12 @@ npm run update:latest        # 升级到 npm latest（当前仍为 0.2.2-rc.1）
 - 指定 `version`：构建并发布指定版本，例如 `0.2.2-rc.3`；
 - `force`：即使版本未变化也重新构建，并覆盖已有 Release 附件。
 
+也可以用 `repository_dispatch` 触发（只需要 `Contents: write` 权限）：
+
+```bash
+gh api -X POST repos/qiaodapei/deepseek-harness-linux/dispatches -f event_type=update-dsh
+```
+
 注意事项：
 
 - 工作流使用 `GITHUB_TOKEN`，需要 `contents: write` 权限（已在工作流中声明）。

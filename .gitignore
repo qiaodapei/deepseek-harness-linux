@@ -1,0 +1,8 @@
+node_modules/
+runtime/
+dist-desktop/
+.env
+.env.*
+*.log
+npm-debug.log*
+.DS_Store

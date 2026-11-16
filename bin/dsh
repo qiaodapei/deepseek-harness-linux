@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# dsh shells out to pnpm for profile/plugin operations. Put both the project
+# CLI and the project-local pnpm on PATH so plugin commands work no matter how
+# this wrapper is invoked.
+export PATH="$root/node_modules/.bin:$PATH"
+
+exec "$root/node_modules/.bin/dsh" "$@"

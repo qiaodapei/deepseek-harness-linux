@@ -1,0 +1,45 @@
+{
+  "name": "deepseek-harness",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DeepSeek Harness (dsh) local workspace: pinned CLI, version updates, and profile plugin management",
+  "license": "MIT",
+  "author": "DeepSeek Harness local build",
+  "main": "desktop/main.mjs",
+  "desktopName": "deepseek-harness.desktop",
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "bin": {
+    "dsh": "bin/dsh"
+  },
+  "scripts": {
+    "dsh": "dsh",
+    "web": "dsh web",
+    "tui": "dsh tui",
+    "headless": "dsh headless",
+    "plugin": "dsh plugin",
+    "desktop": "electron desktop/main.mjs",
+    "desktop:shortcut": "bash desktop/install-shortcut.sh",
+    "appimage": "bash desktop/build-appimage.sh",
+    "update": "npm install --save-dev --save-exact @deepseek-ai/dsh@next",
+    "update:latest": "npm install --save-dev --save-exact @deepseek-ai/dsh@latest",
+    "update:check": "npm view @deepseek-ai/dsh dist-tags --json",
+    "link": "npm link"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.2.2-rc.3",
+    "electron": "45.3.2",
+    "electron-builder": "26.18.0",
+    "pnpm": "12.21.0"
+  },
+  "allowScripts": {
+    "@deepseek-ai/dsh-subprocess-local@0.2.2-rc.3": true,
+    "node-pty@1.2.0-beta.15": true,
+    "koffi@3.1.1": true,
+    "protobufjs@7.6.6": true,
+    "@google/genai@2.21.0": true,
+    "pnpm@12.21.0": true,
+    "electron-winstaller@5.4.0": true
+  }
+}

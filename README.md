@@ -156,6 +156,7 @@ AppImage 启动约 15 秒后检查 GitHub Releases，之后每 6 小时检查一
   `~/.local/state/deepseek-harness/updates/` 并提示手动替换。
 - 校验失败会删除下载文件，不会替换正在运行的客户端。
 - 更新状态保存在 `~/.local/state/deepseek-harness/update-state.json`。
+- 更新器逻辑有独立测试：`npm run test:updater`。
 - 从 `1.0.0` 或更早版本升级时，需要先手动下载一次 `1.1.0`，因为旧版本还没有内置更新器。
 
 ### 私有仓库与 token

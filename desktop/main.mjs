@@ -213,7 +213,9 @@ function updateEntryLabel() {
   const { phase, latest, progress, total } = updateStatus
   if (phase === 'checking') return '正在检查更新…'
   if (phase === 'downloading') {
-    if (total > 0) return `正在下载更新… ${Math.floor((progress / total) * 100)}%`
+    if (total > 0) {
+      return `正在下载更新… ${Math.min(100, Math.floor((progress / total) * 100))}%`
+    }
     return `正在下载更新… ${formatBytes(progress)}`
   }
   if (phase === 'installing') return '正在安装更新…'
@@ -409,7 +411,7 @@ async function showUpdateAvailableDialog() {
   if (latest.publishedAt) {
     lines.push(`发布日期：${new Date(latest.publishedAt).toLocaleString()}`)
   }
-  lines.push('', '更新说明：', plainNotes(latest.notes))
+  lines.push('', '下载完成后会自动重启客户端。', '', '更新说明：', plainNotes(latest.notes))
 
   const { response } = await showMessageBox({
     type: 'info',
@@ -697,7 +699,6 @@ function startAutoUpdateChecks() {
     checkForUpdates({ automatic: true })
   }, Math.max(1000, updateCheckDelayMs))
   timer.unref?.()
-  powerMonitor.on('resume', () => checkForUpdates({ automatic: true }))
 }
 
 function tailServerLog(lines = 30) {
@@ -1175,6 +1176,11 @@ if (!gotLock) {
     createTray()
     createWindow()
     refreshMenus()
+    if (!smokePath) {
+      powerMonitor.on('resume', () => {
+        if (autoCheckEnabled()) checkForUpdates({ automatic: true })
+      })
+    }
     await boot()
   })
 }

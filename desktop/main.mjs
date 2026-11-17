@@ -65,6 +65,10 @@ const updateCheckDelayMs = (() => {
   return Number.isFinite(value) && value >= 0 ? value : 15_000
 })()
 const updateChecksDisabled = process.env.DSH_DISABLE_UPDATE_CHECK === '1'
+// Passed to the process spawned by relaunchAppImage(). The old instance is
+// still shutting down and holds the single-instance lock, so the new instance
+// must wait briefly instead of quitting immediately.
+const RELAUNCH_WAIT_FLAG = '--dsh-relaunch-wait'
 
 app.setName('DeepSeek Harness')
 app.commandLine.appendSwitch('class', 'deepseek-harness')
@@ -629,6 +633,48 @@ async function downloadAndInstallUpdate() {
   }
 }
 
+const APPIMAGE_ENV_KEYS = ['APPIMAGE', 'APPDIR', 'OWD', 'ARGV0']
+const APPIMAGE_PATH_KEYS = [
+  'PATH',
+  'LD_LIBRARY_PATH',
+  'LD_PRELOAD',
+  'XDG_DATA_DIRS',
+  'XDG_CONFIG_DIRS',
+  'GI_TYPELIB_PATH',
+  'GTK_PATH',
+  'GIO_EXTRA_MODULES',
+  'QT_PLUGIN_PATH',
+]
+const APPIMAGE_DIR_KEYS = [
+  'GSETTINGS_SCHEMA_DIR',
+  'GDK_PIXBUF_MODULE_FILE',
+  'GDK_PIXBUF_MODULEDIR',
+  'GIO_MODULE_DIR',
+  'QT_QPA_PLATFORM_PLUGIN_PATH',
+]
+
+// The AppImage runtime exports paths into its own mount. If those are passed to
+// the freshly installed AppImage, it keeps using the old (about to disappear)
+// mount and fails to start. Drop them so the new AppImage mounts itself.
+function relaunchEnvironment() {
+  const env = { ...process.env }
+  const appDir = env.APPDIR || ''
+  for (const key of APPIMAGE_ENV_KEYS) delete env[key]
+  if (!appDir) return env
+  const insideAppDir = (entry) => entry === appDir || entry.startsWith(`${appDir}/`)
+  for (const key of APPIMAGE_PATH_KEYS) {
+    const value = env[key]
+    if (!value) continue
+    const kept = value.split(':').filter((entry) => entry && !insideAppDir(entry))
+    if (kept.length > 0) env[key] = kept.join(':')
+    else delete env[key]
+  }
+  for (const key of APPIMAGE_DIR_KEYS) {
+    if (env[key] && insideAppDir(env[key])) delete env[key]
+  }
+  return env
+}
+
 async function relaunchAppImage(target) {
   quitting = true
   try {
@@ -640,7 +686,22 @@ async function relaunchAppImage(target) {
   const args = process.argv
     .slice(1)
     .filter((arg) => arg !== app.getAppPath() && !arg.endsWith('desktop/main.mjs'))
-  app.relaunch({ execPath: target, args })
+  if (!args.includes(RELAUNCH_WAIT_FLAG)) args.push(RELAUNCH_WAIT_FLAG)
+  // app.relaunch() cannot be used here: it would start the AppImage with the
+  // environment of the current mount. Spawn it through a detached shell with a
+  // clean environment instead.
+  try {
+    const child = spawn('/bin/sh', ['-c', 'sleep 1; exec "$0" "$@"', target, ...args], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: homedir(),
+      env: relaunchEnvironment(),
+    })
+    child.unref()
+    log('relaunching:', target)
+  } catch (error) {
+    log('failed to relaunch:', error.message)
+  }
   app.quit()
 }
 
@@ -1154,7 +1215,17 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => quitApp())
 }
 
-const gotLock = app.requestSingleInstanceLock()
+async function acquireSingleInstanceLock() {
+  const waitForPrevious = process.argv.includes(RELAUNCH_WAIT_FLAG)
+  const deadline = Date.now() + (waitForPrevious ? 15_000 : 0)
+  while (true) {
+    if (app.requestSingleInstanceLock()) return true
+    if (Date.now() >= deadline) return false
+    await delay(200)
+  }
+}
+
+const gotLock = await acquireSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {

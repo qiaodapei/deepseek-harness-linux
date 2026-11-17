@@ -294,6 +294,24 @@ export async function fetchReleases({ repo = DEFAULT_REPO, token = '', etag = ''
   }
 }
 
+// Apply the timeout to the request until response headers arrive. Once fetch()
+// resolves, the body may legitimately take minutes to download (the AppImage is
+// ~355 MB), so the timer is cleared and only the caller-provided abort signal
+// remains active.
+async function fetchWithHeaderTimeout(url, options, timeoutMs) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error('请求更新源超时')), timeoutMs)
+  timer.unref?.()
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, controller.signal])
+    : controller.signal
+  try {
+    return await fetch(url, { ...options, signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function openAsset(asset, token, { signal, timeoutMs = 60_000 } = {}) {
   if (!asset || typeof asset.url !== 'string' || !asset.url) {
     throw new UpdateError('更新包缺少下载地址。', { code: 'invalid-asset' })
@@ -304,18 +322,14 @@ async function openAsset(asset, token, { signal, timeoutMs = 60_000 } = {}) {
   const headers = direct
     ? { 'User-Agent': USER_AGENT }
     : requestHeaders(token, 'application/octet-stream')
-  const combined = signal
-    ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
-    : AbortSignal.timeout(timeoutMs)
 
   let response
   try {
-    response = await fetch(url, {
-      headers,
-      redirect: 'manual',
-      signal: combined,
-    })
+    response = await fetchWithHeaderTimeout(url, { headers, redirect: 'manual', signal }, timeoutMs)
   } catch (error) {
+    if (signal?.aborted) {
+      throw new UpdateError('下载已取消。', { code: 'aborted', cause: error })
+    }
     throw new UpdateError(`无法下载更新文件：${error.message}`, { code: 'network', cause: error })
   }
 
@@ -329,12 +343,15 @@ async function openAsset(asset, token, { signal, timeoutMs = 60_000 } = {}) {
     }
 
     try {
-      response = await fetch(location, {
-        headers: { 'User-Agent': USER_AGENT },
-        redirect: 'follow',
-        signal: combined,
-      })
+      response = await fetchWithHeaderTimeout(
+        location,
+        { headers: { 'User-Agent': USER_AGENT }, redirect: 'follow', signal },
+        timeoutMs,
+      )
     } catch (error) {
+      if (signal?.aborted) {
+        throw new UpdateError('下载已取消。', { code: 'aborted', cause: error })
+      }
       throw new UpdateError(`无法下载更新文件：${error.message}`, { code: 'network', cause: error })
     }
   }
@@ -377,13 +394,13 @@ export async function ensureFreeSpace(directory, requiredBytes) {
 export async function downloadAssetToFile(
   asset,
   destination,
-  { token = '', expectedSha256 = '', onProgress, signal } = {},
+  { token = '', expectedSha256 = '', onProgress, signal, timeoutMs = 60_000 } = {},
 ) {
   await mkdir(dirname(destination), { recursive: true })
   const temporary = `${destination}.part`
   await rm(temporary, { force: true })
 
-  const response = await openAsset(asset, token, { signal })
+  const response = await openAsset(asset, token, { signal, timeoutMs })
   if (!response.body) {
     throw new UpdateError('更新包没有可读取的数据流。', { code: 'download' })
   }

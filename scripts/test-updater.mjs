@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -103,6 +104,41 @@ assert.equal(parseSha256('not a hash'), null)
 assert.equal(formatBytes(0), '0 B')
 assert.equal(formatBytes(355 * 1024 * 1024), '355 MB')
 
+async function withServer(handler, run) {
+  const server = createServer(handler)
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  try {
+    return await run(`http://127.0.0.1:${address.port}`)
+  } finally {
+    server.closeAllConnections?.()
+    await new Promise((resolve) => server.close(resolve))
+  }
+}
+
+function slowResponse(payload, intervalMs = 40) {
+  return (_request, response) => {
+    response.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': payload.length,
+    })
+    let offset = 0
+    const timer = setInterval(() => {
+      if (offset >= payload.length) {
+        clearInterval(timer)
+        response.end()
+        return
+      }
+      response.write(payload.subarray(offset, offset + 4))
+      offset += 4
+    }, intervalMs)
+    response.on('close', () => clearInterval(timer))
+  }
+}
+
 const root = await mkdtemp(join(tmpdir(), 'dsh-updater-test-'))
 try {
   const payload = Buffer.from('hello update payload')
@@ -133,6 +169,60 @@ try {
     ),
     /SHA256/,
   )
+
+  const slowPayload = Buffer.from('slow http update payload')
+  const slowSha = createHash('sha256').update(slowPayload).digest('hex')
+
+  // Headers arrive immediately, but the body takes longer than the header
+  // timeout. The download must still succeed.
+  await withServer(slowResponse(slowPayload), async (base) => {
+    const slowTarget = join(root, 'downloads', 'slow.AppImage')
+    const slowResult = await downloadAssetToFile(
+      { name: 'slow.AppImage', url: `${base}/slow`, browserDownloadUrl: '' },
+      slowTarget,
+      { expectedSha256: slowSha, timeoutMs: 100 },
+    )
+    assert.equal(slowResult.size, slowPayload.length)
+    assert.deepEqual(await readFile(slowTarget), slowPayload)
+  })
+
+  // A server that never sends headers should hit the timeout.
+  await withServer(
+    (_request, response) => {
+      setTimeout(() => {
+        if (response.destroyed) return
+        response.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': slowPayload.length,
+        })
+        response.end(slowPayload)
+      }, 300)
+    },
+    async (base) => {
+      await assert.rejects(
+        downloadAssetToFile(
+          { name: 'slow.AppImage', url: `${base}/slow`, browserDownloadUrl: '' },
+          join(root, 'downloads', 'timeout.AppImage'),
+          { timeoutMs: 100 },
+        ),
+        /无法下载更新文件/,
+      )
+    },
+  )
+
+  // User cancellation during the body must be reported as aborted.
+  await withServer(slowResponse(slowPayload), async (base) => {
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 50)
+    await assert.rejects(
+      downloadAssetToFile(
+        { name: 'slow.AppImage', url: `${base}/slow`, browserDownloadUrl: '' },
+        join(root, 'downloads', 'aborted.AppImage'),
+        { signal: controller.signal, timeoutMs: 1000 },
+      ),
+      (error) => error.code === 'aborted',
+    )
+  })
 
   const target = join(root, 'apps', 'DeepSeek-Harness.AppImage')
   await mkdir(join(root, 'apps'), { recursive: true })

@@ -22,6 +22,7 @@ import {
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { format } from 'node:util'
 import {
   DEFAULT_REPO,
   compareVersions,
@@ -104,7 +105,24 @@ let lastUpdateUiAt = 0
 let installedDshVersion = ''
 const activeNotifications = new Set()
 
-const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args)
+// A desktop launcher may close stdout/stderr when its parent process exits.
+// Logging is best-effort and must never crash the main process with EPIPE.
+function safeWrite(stream, data) {
+  if (!stream || stream.destroyed || stream.writable === false) return false
+  try {
+    return stream.write(data)
+  } catch (error) {
+    if (error?.code === 'EPIPE') return false
+    throw error
+  }
+}
+
+for (const stream of [process.stdout, process.stderr]) {
+  stream?.on?.('error', () => {})
+}
+
+const log = (...args) =>
+  safeWrite(process.stdout, `[${new Date().toISOString()}] ${format(...args)}\n`)
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function currentAppVersion() {
@@ -761,7 +779,8 @@ function tailServerLog(lines = 30) {
 function startServer() {
   mkdirSync(stateDir, { recursive: true })
   const output = createWriteStream(serverLog, { flags: 'a' })
-  output.write(`\n===== ${new Date().toISOString()} starting dsh web =====\n`)
+  output.on('error', () => {})
+  safeWrite(output, `\n===== ${new Date().toISOString()} starting dsh web =====\n`)
 
   const env = {
     ...process.env,
@@ -799,8 +818,8 @@ function startServer() {
 
     const feed = (chunk) => {
       const text = chunk.toString('utf8')
-      output.write(chunk)
-      process.stdout.write(text)
+      safeWrite(output, chunk)
+      safeWrite(process.stdout, text)
       if (settled) return
       seen = (seen + text).slice(-131072)
       const match = seen.match(/dsh web:\s+(https?:\/\/[^\s]+)/)
@@ -815,7 +834,7 @@ function startServer() {
 
     child.once('exit', (code, signal) => {
       if (serverChild === child) serverChild = null
-      output.write(`===== ${new Date().toISOString()} exited code=${code} signal=${signal} =====\n`)
+      safeWrite(output, `===== ${new Date().toISOString()} exited code=${code} signal=${signal} =====\n`)
       output.end()
       if (!settled) {
         finish(new Error(`dsh 服务启动失败（code=${code}, signal=${signal}）\n\n${tailServerLog(15)}`))
@@ -827,7 +846,7 @@ function startServer() {
 
     child.once('error', (error) => {
       if (serverChild === child) serverChild = null
-      output.write(`spawn error: ${error.stack || error}\n`)
+      safeWrite(output, `spawn error: ${error.stack || error}\n`)
       output.end()
       finish(new Error(`无法启动 dsh：${error.message}`))
     })

@@ -111,6 +111,21 @@ chmod +x dist-desktop/DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage
 ./dist-desktop/DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage
 ```
 
+### 安装到应用菜单（可选）
+
+如果希望从应用菜单启动，而不是每次手动运行 AppImage：
+
+```bash
+desktop/install-appimage.sh ~/Applications/DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage
+```
+
+脚本会安装多尺寸图标到 `~/.local/share/icons/hicolor`，并生成
+`~/.local/share/applications/deepseek-harness.desktop`。桌面入口使用图标的绝对路径，
+不依赖图标主题缓存，避免任务栏或应用菜单显示齿轮占位图。升级后如果 AppImage
+文件名变化，重新执行一次即可；不带参数时会自动选择 `~/Applications` 里最新的 AppImage。
+
+> 如果任务栏仍显示旧图标，注销并重新登录一次，GNOME Shell 会刷新内存中的图标缓存。
+
 构建过程：
 
 1. `desktop/prepare-runtime.sh` 把 `/usr/bin/node`（ABI 与当前原生模块一致）和项目

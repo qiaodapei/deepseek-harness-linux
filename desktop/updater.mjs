@@ -149,7 +149,7 @@ export function normalizeRelease(raw, { repo = DEFAULT_REPO } = {}) {
   if (!raw || raw.draft) return null
 
   const tag = typeof raw.tag_name === 'string' ? raw.tag_name : ''
-  const tagMatch = /^v(.+)$/i.exec(tag)
+  const tagMatch = /^dsh-v(.+)$/i.exec(tag)
   if (!tagMatch) return null
 
   const version = parseVersion(tagMatch[1])
@@ -161,7 +161,10 @@ export function normalizeRelease(raw, { repo = DEFAULT_REPO } = {}) {
     return /\.AppImage$/i.test(asset.name) && !/\.sha256$/i.test(asset.name)
   })
   const archPattern = process.arch === 'arm64' ? /aarch64|arm64/i : /x86_64|amd64/i
-  const appImage = appImages.find((asset) => archPattern.test(asset.name))
+  const archAssets = appImages.filter((asset) => archPattern.test(asset.name))
+  const expectedName = `DeepSeek-Harness-${version.raw}-`
+  const appImage =
+    archAssets.find((asset) => asset.name.startsWith(expectedName)) || archAssets[0]
   if (!appImage) return null
 
   const shaAsset = assets.find((asset) => asset.name === `${appImage.name}.sha256`)

@@ -2,6 +2,7 @@
 // Regression tests for the pure update helpers.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,6 +16,13 @@ import {
   parseVersion,
   selectLatestRelease,
 } from '../desktop/updater.mjs'
+
+const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+assert.equal(
+  manifest.version,
+  manifest.devDependencies['@deepseek-ai/dsh'],
+  'package.json version must match the bundled dsh version',
+)
 
 assert.equal(parseVersion('v1.2.3').raw, '1.2.3')
 assert.equal(parseVersion('dsh-v0.2.2-rc.3').raw, '0.2.2-rc.3')
@@ -54,21 +62,41 @@ const release = (tag, name, extra = {}) => ({
   ...extra,
 })
 
-assert.equal(normalizeRelease(release('dsh-v0.2.2-rc.3', 'DeepSeek-Harness-1.0.0-x86_64.AppImage')), null)
-const normalized = normalizeRelease(release('v1.1.0', 'DeepSeek-Harness-1.1.0-x86_64.AppImage'))
-assert.equal(normalized.version, '1.1.0')
-assert.equal(normalized.appImage.name, 'DeepSeek-Harness-1.1.0-x86_64.AppImage')
+assert.equal(
+  normalizeRelease(release('v0.2.2-rc.3', 'DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage')),
+  null,
+)
+const normalized = normalizeRelease(
+  release('dsh-v0.2.2-rc.3', 'DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage'),
+)
+assert.equal(normalized.version, '0.2.2-rc.3')
+assert.equal(normalized.appImage.name, 'DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage')
 assert.equal(normalized.shaAsset.name.endsWith('.sha256'), true)
 
+const mixedAssets = release('dsh-v0.2.2-rc.4', 'DeepSeek-Harness-0.2.2-rc.4-x86_64.AppImage')
+mixedAssets.assets.unshift({
+  name: 'DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage',
+  size: 1234,
+  url: 'https://api.example.test/assets/mixed/old.AppImage',
+  browser_download_url: 'https://example.test/download/old.AppImage',
+})
+assert.equal(
+  normalizeRelease(mixedAssets).appImage.name,
+  'DeepSeek-Harness-0.2.2-rc.4-x86_64.AppImage',
+)
+
 const releases = [
-  release('dsh-v0.2.2-rc.3', 'DeepSeek-Harness-1.0.0-x86_64.AppImage'),
+  release('dsh-v0.2.2-rc.3', 'DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage'),
+  release('dsh-v0.2.2-rc.4', 'DeepSeek-Harness-0.2.2-rc.4-x86_64.AppImage'),
+  release('dsh-v0.2.3', 'DeepSeek-Harness-0.2.3-x86_64.AppImage'),
+  release('dsh-v0.2.1', 'DeepSeek-Harness-0.2.1-x86_64.AppImage'),
   release('v1.1.0', 'DeepSeek-Harness-1.1.0-x86_64.AppImage'),
-  release('v1.2.0', 'DeepSeek-Harness-1.2.0-x86_64.AppImage'),
-  release('v1.0.9', 'DeepSeek-Harness-1.0.9-x86_64.AppImage'),
 ]
-assert.equal(selectLatestRelease(releases, '1.0.0').version, '1.2.0')
-assert.equal(selectLatestRelease(releases, '1.2.0'), null)
-assert.equal(selectLatestRelease(releases, '1.3.0'), null)
+assert.equal(selectLatestRelease(releases, '0.2.1').version, '0.2.3')
+assert.equal(selectLatestRelease(releases, '0.2.2-rc.2').version, '0.2.3')
+assert.equal(selectLatestRelease(releases, '0.2.2-rc.3').version, '0.2.3')
+assert.equal(selectLatestRelease(releases, '0.2.3'), null)
+assert.equal(selectLatestRelease(releases, '0.2.4'), null)
 
 assert.equal(parseSha256(`${sha}  file.AppImage\n`), sha)
 assert.equal(parseSha256('not a hash'), null)

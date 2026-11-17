@@ -163,12 +163,6 @@ function reportUpdateProgress(received, total) {
   }
 }
 
-function releaseDshVersion(release) {
-  const text = `${release?.name || ''}\n${release?.notes || ''}`
-  const match = /(?:内置\s*)?\*{0,2}dsh\s+([0-9][0-9A-Za-z.+-]*)/i.exec(text)
-  return match ? match[1] : ''
-}
-
 function plainNotes(notes) {
   let text = String(notes || '')
     .replace(/<[^>]+>/g, '')
@@ -401,11 +395,12 @@ async function showUpdateAvailableDialog() {
 
   const current = currentAppVersion()
   const currentDsh = getInstalledDshVersion()
-  const nextDsh = releaseDshVersion(latest)
+  const currentLabel =
+    currentDsh && currentDsh !== current ? `${current}（内置 dsh ${currentDsh}）` : current
   const size = latest.appImage.size ? formatBytes(latest.appImage.size) : '未知大小'
   const lines = [
-    `当前版本：${current}（内置 dsh ${currentDsh}）`,
-    `新版本：${latest.version}${nextDsh ? `（内置 dsh ${nextDsh}）` : ''}`,
+    `当前版本：${currentLabel}`,
+    `新版本：${latest.version}`,
     `更新包：${latest.appImage.name}（${size}）`,
   ]
   if (latest.publishedAt) {
@@ -431,23 +426,16 @@ async function showUpdateAvailableDialog() {
 async function showUpToDateDialog() {
   showWindow()
   const current = currentAppVersion()
-  let latestVersion = current
-  try {
-    if (updateState.latest && compareVersions(updateState.latest.version, current) === 0) {
-      latestVersion = updateState.latest.version
-    }
-  } catch {}
+  const currentDsh = getInstalledDshVersion()
+  const detail = [`当前版本：${current}`]
+  if (currentDsh !== current) detail.push(`内置 dsh：${currentDsh}`)
+  detail.push(`更新源：https://github.com/${updateRepo}/releases`)
 
   const { response } = await showMessageBox({
     type: 'info',
     title: '检查更新',
     message: '当前已是最新版本',
-    detail: [
-      `当前版本：${current}`,
-      `内置 dsh：${getInstalledDshVersion()}`,
-      `最新版本：${latestVersion}`,
-      `更新源：https://github.com/${updateRepo}/releases`,
-    ].join('\n'),
+    detail: detail.join('\n'),
     buttons: ['确定', '打开 Release 页面'],
     defaultId: 0,
     cancelId: 0,
@@ -1042,19 +1030,21 @@ function showAbout() {
   const lastCheck = updateState.lastCheck
     ? new Date(updateState.lastCheck).toLocaleString()
     : '尚未检查'
+  const installedDsh = getInstalledDshVersion()
+  const detail = [`Version: ${app.getVersion()}`]
+  if (installedDsh !== app.getVersion()) detail.push(`dsh version: ${installedDsh}`)
+  detail.push(
+    `Update source: ${updateRepo}`,
+    `Last update check: ${lastCheck}`,
+    `Project: ${projectRoot}`,
+    `Server: ${serverUrl || '(not running)'}`,
+    `Server log: ${serverLog}`,
+  )
   const options = {
     type: 'info',
     title: 'About DeepSeek Harness',
     message: 'DeepSeek Harness Desktop',
-    detail: [
-      `Shell version: ${app.getVersion()}`,
-      `dsh version: ${getInstalledDshVersion()}`,
-      `Update source: ${updateRepo}`,
-      `Last update check: ${lastCheck}`,
-      `Project: ${projectRoot}`,
-      `Server: ${serverUrl || '(not running)'}`,
-      `Server log: ${serverLog}`,
-    ].join('\n'),
+    detail: detail.join('\n'),
     buttons: ['OK'],
   }
   if (win && !win.isDestroyed()) dialog.showMessageBox(win, options)

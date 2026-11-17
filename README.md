@@ -101,14 +101,14 @@ npm run appimage
 产物：
 
 ```text
-dist-desktop/DeepSeek-Harness-1.1.0-x86_64.AppImage   # 约 355 MB
+dist-desktop/DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage   # 约 355 MB
 ```
 
 直接运行（或 chmod 后在文件管理器双击）：
 
 ```bash
-chmod +x dist-desktop/DeepSeek-Harness-1.1.0-x86_64.AppImage
-./dist-desktop/DeepSeek-Harness-1.1.0-x86_64.AppImage
+chmod +x dist-desktop/DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage
+./dist-desktop/DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage
 ```
 
 构建过程：
@@ -124,7 +124,7 @@ chmod +x dist-desktop/DeepSeek-Harness-1.1.0-x86_64.AppImage
 - 用户数据仍在 `~/.dsh`；日志仍在 `~/.local/state/deepseek-harness/`。删除 AppImage 不会删除会话和登录态。
 - Ubuntu 24.10 / 26.04 运行 AppImage 需要 FUSE2：`sudo apt install libfuse2t64`。没有 FUSE 时用：
   ```bash
-  ./DeepSeek-Harness-1.1.0-x86_64.AppImage --appimage-extract-and-run
+  ./DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage --appimage-extract-and-run
   ```
 - AppImage 自带 Node、dsh、pnpm，但不自带 glibc。本地构建使用当前系统（Ubuntu 26.04，glibc 2.43）；
   GitHub Actions 使用 Ubuntu 24.04（glibc 2.39）。目标系统的 glibc 不能低于构建机。
@@ -135,13 +135,20 @@ chmod +x dist-desktop/DeepSeek-Harness-1.1.0-x86_64.AppImage
 
 ## 客户端自动更新
 
-AppImage 启动约 15 秒后检查 GitHub Releases，之后每 6 小时检查一次；系统从睡眠恢复时也会补查。
-发现新版本后：
+客户端版本直接采用内置 dsh 版本，Release 标签也使用官方命名 `dsh-v<version>`。例如官方
+`dsh-v0.2.2-rc.3` 对应应用版本 `0.2.2-rc.3` 和
+`DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage`，不再单独维护客户端版本号。
 
-1. 托盘菜单显示 **安装更新 vX.Y.Z**，并发送系统通知；
-2. 用户确认后下载对应的 `DeepSeek-Harness-<version>-x86_64.AppImage`；
+AppImage 启动约 15 秒后检查 GitHub Releases 的 `dsh-v*` 标签，之后每 6 小时检查一次；
+系统从睡眠恢复时也会补查。发现新版本后：
+
+1. 托盘菜单显示 **安装更新 `<version>`**，并发送系统通知；
+2. 用户确认后下载对应的完整 `DeepSeek-Harness-<version>-x86_64.AppImage`；
 3. 用 Release 附带的 `.sha256` 校验下载内容；
 4. 原子替换当前 AppImage，停止 dsh 服务并自动重启客户端。
+
+更新在应用内完成，但下载和替换的是完整客户端；也可以直接从 Release 页面手动下载 AppImage
+覆盖安装。两种方式都使用同一份 `~/.dsh` 用户数据。
 
 手动入口：
 
@@ -157,12 +164,15 @@ AppImage 启动约 15 秒后检查 GitHub Releases，之后每 6 小时检查一
 - 校验失败会删除下载文件，不会替换正在运行的客户端。
 - 更新状态保存在 `~/.local/state/deepseek-harness/update-state.json`。
 - 更新器逻辑有独立测试：`npm run test:updater`。
-- 从 `1.0.0` 或更早版本升级时，需要先手动下载一次 `1.1.0`，因为旧版本还没有内置更新器。
+- 因为客户端版本跟随 dsh，客户端代码的单独修复不会自动产生新版本；需要覆盖同一版本的
+  Release，或等待下一个官方 dsh 版本。覆盖同一版本后，已安装同版本的用户不会收到自动更新提示。
+- 从旧的 `1.0.0` / `1.1.0` 客户端迁移时，需要手动安装一次 `0.2.2-rc.3`：旧版本号高于
+  `0.2.2-rc.3`，更新器不会自动降级。
 
-### 私有仓库与 token
+### 更新源与 token
 
-默认更新源是 `qiaodapei/deepseek-harness-linux`。该仓库目前是**私有**的，未登录的客户端无法读取
-Release。分发 AppImage 时建议把仓库设为公开；如果必须保持私有，需要给每台机器配置只读 token：
+默认更新源是 `qiaodapei/deepseek-harness-linux`，仓库已经设为**公开**，客户端无需登录即可检查更新。
+如果使用私有镜像或私有 fork，需要给每台机器配置只读 token：
 
 ```bash
 mkdir -p ~/.config/deepseek-harness
@@ -194,7 +204,9 @@ npm run update:latest        # 升级到 npm latest（当前仍为 0.2.2-rc.1）
   `0.2.2-rc.1`；因此本项目默认跟踪 `next`。只有需要回退到 npm `latest` 时才用
   `npm run update:latest`。
 - 升级会改写 `package.json` 中的精确版本，`package-lock.json` 保证可复现。
-- 回滚：`npm install -D -E @deepseek-ai/dsh@<旧版本>`。
+- 应用版本与内置 dsh 版本保持一致。手动升级 dsh 后执行
+  `npm version "$(./bin/dsh --version)" --no-git-tag-version`；Actions 工作流会自动完成这一步。
+- 回滚：`npm install -D -E @deepseek-ai/dsh@<旧版本>`，然后用 `npm version` 同步应用版本。
 - 如果升级后 npm 提示 `install scripts not yet covered by allowScripts`，先审查再放行并重建：
   ```bash
   npm install-scripts ls
@@ -212,16 +224,18 @@ npm run update:latest        # 升级到 npm latest（当前仍为 0.2.2-rc.1）
 `dsh-v*` release。发现新 dsh 版本时自动：
 
 1. 确认 npm 上存在对应版本的 `@deepseek-ai/dsh`；
-2. 把客户端补丁版本加一（例如 `1.1.0` → `1.1.1`），更新 `package.json`、`package-lock.json`；
+2. 把 `package.json` / `package-lock.json` 的应用版本对齐到该 dsh 版本；
 3. 更新 README 中的 dsh 版本和 AppImage 文件名；
 4. 重新安装依赖并执行 `npm run appimage`；
 5. 校验 AppImage 文件名、内置 dsh 版本，并计算 SHA256；
 6. 提交变更并推送 `main`；
-7. 创建或更新标签为 `v<clientVersion>` 的 GitHub Release，上传 AppImage 和 `.sha256`。
+7. 创建或更新标签为 `dsh-v<version>` 的 GitHub Release，上传 AppImage 和 `.sha256`。
 
-Release 标题会同时标注客户端版本和 dsh 版本，例如
-`DeepSeek Harness 1.1.1 (dsh 0.2.2-rc.4)`。客户端更新器只识别 `v*` 标签，旧的
-`dsh-v0.2.2-rc.3` Release 不会被误判为客户端版本。
+版本规则：客户端版本 = 内置 dsh 版本 = Release 标签去掉 `dsh-v` 前缀。例如官方
+`dsh-v0.2.2-rc.3` 对应客户端 `0.2.2-rc.3`、AppImage
+`DeepSeek-Harness-0.2.2-rc.3-x86_64.AppImage` 和 GitHub Release 标签 `dsh-v0.2.2-rc.3`。
+Release 标题为 `DeepSeek Harness 0.2.2-rc.3`，不再有独立的客户端版本号。客户端更新器
+只识别 `dsh-v*` 标签。
 
 也可以在 Actions 页面手动触发 **Update dsh and release AppImage**：
 
@@ -241,10 +255,9 @@ gh api -X POST repos/qiaodapei/deepseek-harness-linux/dispatches -f event_type=u
 - 如果新版本引入了未审核的 npm 安装脚本，工作流会失败。此时在本地执行
   `npm install-scripts approve <pkg>`，提交 `package.json` 后重新触发。
 - 自动构建运行在 `ubuntu-24.04`，产物体积较大（当前约 355 MB），Release 附件上限为 2 GiB。
-- 自动提交作者为 `github-actions[bot]`，提交信息格式为
-  `chore: release <clientVersion> with dsh <dshVersion>`。
-- 只想修改客户端代码时，需要手动提升 `package.json` 的 `version` 并推送；否则工作流认为
-  当前客户端版本已经发布完成。
+- 自动提交作者为 `github-actions[bot]`，提交信息格式为 `chore: release <version>`。
+- 客户端版本跟随 dsh，因此只修改客户端代码时不会单独产生新版本。需要分发这类修复时，可以用
+  `force=true` 覆盖同一版本的 Release；已经安装同版本的用户不会收到自动更新提示，需要手动重新下载。
 
 ## 插件管理
 

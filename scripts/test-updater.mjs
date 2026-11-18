@@ -10,13 +10,24 @@ import { join } from 'node:path'
 import {
   compareVersions,
   downloadAssetToFile,
+  fetchLatestNpmVersion,
+  fetchNpmDistTags,
   formatBytes,
   installAppImage,
   normalizeRelease,
   parseSha256,
   parseVersion,
+  selectLatestNpmVersion,
   selectLatestRelease,
 } from '../desktop/updater.mjs'
+import {
+  activateRuntime,
+  clearRuntimeBroken,
+  markRuntimeBroken,
+  pruneRuntimeVersions,
+  resolveActiveRuntime,
+  runtimeLayout,
+} from '../desktop/runtime.mjs'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 assert.equal(
@@ -103,6 +114,12 @@ assert.equal(parseSha256(`${sha}  file.AppImage\n`), sha)
 assert.equal(parseSha256('not a hash'), null)
 assert.equal(formatBytes(0), '0 B')
 assert.equal(formatBytes(355 * 1024 * 1024), '355 MB')
+
+assert.equal(selectLatestNpmVersion({ latest: '0.2.2-rc.1', next: '0.2.2-rc.5' }), '0.2.2-rc.5')
+assert.equal(selectLatestNpmVersion({ latest: '0.2.3', next: '0.2.3-rc.5' }), '0.2.3')
+assert.equal(selectLatestNpmVersion({ latest: '0.2.2-rc.1' }), '0.2.2-rc.1')
+assert.equal(selectLatestNpmVersion({ latest: 'not-a-version' }), null)
+assert.equal(selectLatestNpmVersion({}), null)
 
 async function withServer(handler, run) {
   const server = createServer(handler)
@@ -238,6 +255,75 @@ try {
     ),
     true,
   )
+
+  // npm dist-tags: `next` may be newer than `latest`.
+  await withServer(
+    (request, response) => {
+      if (!request.url?.includes('@deepseek-ai')) {
+        response.writeHead(404)
+        response.end()
+        return
+      }
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(
+        JSON.stringify({ 'dist-tags': { latest: '0.2.2-rc.1', next: '0.2.2-rc.5' } }),
+      )
+    },
+    async (base) => {
+      const tags = await fetchNpmDistTags({ registry: base })
+      assert.equal(tags.tags.next, '0.2.2-rc.5')
+      const latest = await fetchLatestNpmVersion({ registries: [base] })
+      assert.equal(latest.version, '0.2.2-rc.5')
+      assert.equal(latest.registry, base)
+    },
+  )
+
+  // Managed runtime layout, activation, fallback and pruning.
+  const dataDir = join(root, 'data')
+  const bundledRoot = join(root, 'bundled')
+  const fakeRuntime = async (version) => {
+    const dir = join(runtimeLayout(dataDir).versions, version)
+    await mkdir(join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib'), { recursive: true })
+    await mkdir(join(dir, 'bin'), { recursive: true })
+    await writeFile(
+      join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+      JSON.stringify({ version }),
+    )
+    await writeFile(join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '')
+    await writeFile(join(dir, 'bin', 'dsh'), '#!/bin/sh\n')
+    return dir
+  }
+  await fakeRuntime('0.2.2-rc.4')
+  const rc5 = await fakeRuntime('0.2.2-rc.5')
+  await mkdir(join(bundledRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib'), {
+    recursive: true,
+  })
+  await mkdir(join(bundledRoot, 'bin'), { recursive: true })
+  await writeFile(
+    join(bundledRoot, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+    JSON.stringify({ version: '0.2.2-rc.3' }),
+  )
+  await writeFile(join(bundledRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '')
+  await writeFile(join(bundledRoot, 'bin', 'dsh'), '#!/bin/sh\n')
+
+  let resolved = resolveActiveRuntime({ bundledRoot, dataDir })
+  assert.equal(resolved.source, 'bundled')
+  assert.equal(resolved.version, '0.2.2-rc.3')
+
+  await activateRuntime(dataDir, '0.2.2-rc.5')
+  resolved = resolveActiveRuntime({ bundledRoot, dataDir })
+  assert.equal(resolved.source, 'managed')
+  assert.equal(resolved.version, '0.2.2-rc.5')
+  assert.equal(resolved.root, rc5)
+
+  await markRuntimeBroken(dataDir, '0.2.2-rc.5')
+  assert.equal(resolveActiveRuntime({ bundledRoot, dataDir }).source, 'bundled')
+  await clearRuntimeBroken(dataDir, '0.2.2-rc.5')
+  assert.equal(resolveActiveRuntime({ bundledRoot, dataDir }).source, 'managed')
+
+  const removed = await pruneRuntimeVersions(dataDir, ['0.2.2-rc.5'])
+  assert.deepEqual(removed, ['0.2.2-rc.4'])
+  assert.equal(resolveActiveRuntime({ bundledRoot, dataDir }).version, '0.2.2-rc.5')
 } finally {
   await rm(root, { recursive: true, force: true })
 }

@@ -69,7 +69,8 @@ npm run desktop:shortcut     # 安装应用菜单入口（只需执行一次）
 | 路径 | 说明 |
 |---|---|
 | `desktop/main.mjs` | Electron 主进程：启动/停止 dsh、窗口、托盘、单实例、更新界面 |
-| `desktop/updater.mjs` | 版本比较、GitHub Release 检查、下载与 AppImage 替换 |
+| `desktop/updater.mjs` | 版本比较、GitHub/npm 版本检查、下载与 AppImage 替换 |
+| `desktop/runtime.mjs` | 用户目录 dsh runtime 的安装、校验、原子切换与回滚 |
 | `desktop/splash.html` | 启动画面 |
 | `desktop/assets/` | 官方 DeepSeek Harness 图标 |
 | `scripts/desktop-launch.sh` | 应用菜单实际执行的启动脚本 |
@@ -144,26 +145,31 @@ desktop/install-appimage.sh ~/Applications/DeepSeek-Harness-0.2.2-rc.5-x86_64.Ap
 - AppImage 自带 Node、dsh、pnpm，但不自带 glibc。本地构建使用当前系统（Ubuntu 26.04，glibc 2.43）；
   GitHub Actions 使用 Ubuntu 24.04（glibc 2.39）。目标系统的 glibc 不能低于构建机。
 - 本机 AppArmor 限制下 AppImage 会自动使用 `--no-sandbox`（AppRun 检测 + desktop 入口参数）。
-- AppImage 内置自动更新：启动后会自动检查 GitHub Release，也可从托盘或帮助菜单手动检查。
-  更新只替换 AppImage 文件，仍使用同一份 `~/.dsh` 用户数据。
+- AppImage 内置自动更新：启动后会自动检查 GitHub Release 和 npm 版本，也可从托盘或帮助菜单手动检查。
+  默认优先内部更新 dsh，只有壳层更新或内部更新失败时才下载完整 AppImage；两种方式都使用同一份 `~/.dsh` 用户数据。
 - 重新打包前建议先退出正在运行的桌面客户端，否则新 AppImage 可能只是唤醒旧实例。
 
 ## 客户端自动更新
 
-客户端版本直接采用内置 dsh 版本，Release 标签也使用官方命名 `dsh-v<version>`。例如官方
+客户端版本直接采用 dsh 版本，Release 标签也使用官方命名 `dsh-v<version>`。例如官方
 `dsh-v0.2.2-rc.5` 对应应用版本 `0.2.2-rc.5` 和
 `DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage`，不再单独维护客户端版本号。
 
-AppImage 启动约 15 秒后检查 GitHub Releases 的 `dsh-v*` 标签，之后每 6 小时检查一次；
-系统从睡眠恢复时也会补查。发现新版本后：
+AppImage 启动约 15 秒后同时检查 GitHub Releases 的 `dsh-v*` 标签和 npm 的
+`latest` / `next` dist-tag，取两者中的最高版本；之后每小时检查一次，系统从睡眠恢复时也会补查。
+发现新版本后默认执行**内部更新**：
 
 1. 托盘菜单显示 **安装更新 `<version>`**，并发送系统通知；
-2. 用户确认后下载对应的完整 `DeepSeek-Harness-<version>-x86_64.AppImage`；
-3. 用 Release 附带的 `.sha256` 校验下载内容；
-4. 原子替换当前 AppImage，停止 dsh 服务并自动重启客户端。
+2. 使用 AppImage 内置的 Node 和 pnpm，把 `@deepseek-ai/dsh@<version>` 安装到
+   `~/.local/share/deepseek-harness/runtime/versions/<version>/`；
+3. 复用 `~/.local/share/deepseek-harness/runtime/store/`，后续更新只下载有变化的 npm 包；
+4. 校验安装后的 dsh 版本和启动器，原子切换 `runtime/current` 链接；
+5. 只重启 dsh 服务并重新加载窗口，客户端不退出。
 
-更新在应用内完成，但下载和替换的是完整客户端；也可以直接从 Release 页面手动下载 AppImage
-覆盖安装。两种方式都使用同一份 `~/.dsh` 用户数据。
+如果新版本启动失败，会自动切回上一个 runtime 或 AppImage 内置 runtime，并在下次启动时
+跳过损坏版本。完整 AppImage 更新仍然保留：更新对话框和托盘菜单可选择 **下载完整安装包**，
+用于壳层更新或内部更新失败时回退。完整更新会下载 `DeepSeek-Harness-<version>-x86_64.AppImage`、
+用 Release 附带的 `.sha256` 校验，然后原子替换当前 AppImage 并重启客户端。
 
 手动入口：
 
@@ -173,14 +179,16 @@ AppImage 启动约 15 秒后检查 GitHub Releases 的 `dsh-v*` 标签，之后�
 
 几个细节：
 
-- 更新采用“替换当前文件”的方式，AppImage 文件名不会改变；实际版本可在 **关于** 中查看。
-- 更新包会先写入当前 AppImage 同目录再替换。若该目录不可写，则下载到
+- 内部更新的 dsh 运行在用户目录，AppImage 本身不变；**关于** 中会分别显示 dsh 版本和客户端壳版本。
+- 第一次内部更新需要下载完整的 dsh 依赖（约数百 MB，但通常比完整 AppImage 快）；之后共用 pnpm store，只下载变化部分。
+- 完整安装包会先写入当前 AppImage 同目录再替换。若该目录不可写，则下载到
   `~/.local/state/deepseek-harness/updates/` 并提示手动替换。
 - 校验失败会删除下载文件，不会替换正在运行的客户端。
-- 更新状态保存在 `~/.local/state/deepseek-harness/update-state.json`。
+- runtime 目录：`~/.local/share/deepseek-harness/runtime/`；更新状态保存在
+  `~/.local/state/deepseek-harness/update-state.json`。
 - 更新器逻辑有独立测试：`npm run test:updater`。
-- 因为客户端版本跟随 dsh，客户端代码的单独修复不会自动产生新版本；需要覆盖同一版本的
-  Release，或等待下一个官方 dsh 版本。覆盖同一版本后，已安装同版本的用户不会收到自动更新提示。
+- 因为客户端壳版本跟随发布时的 dsh，内部更新只升级 dsh，不会改变壳版本；壳层修复仍通过完整
+  AppImage 发布。覆盖同一版本的 Release 后，已安装同版本的用户不会收到自动更新提示。
 - 从旧的 `1.0.0` / `1.1.0` 客户端迁移时，需要手动安装一次 `0.2.2-rc.5`：旧版本号高于
   `0.2.2-rc.5`，更新器不会自动降级。
 
@@ -204,6 +212,7 @@ chmod 600 ~/.config/deepseek-harness/github-token
 DSH_UPDATE_REPO=owner/repo          # 覆盖更新源仓库
 DSH_DISABLE_UPDATE_CHECK=1          # 完全禁用自动检查（手动检查仍可用）
 DSH_UPDATE_CHECK_DELAY_MS=5000      # 调整启动后首次检查延迟
+DSH_NPM_REGISTRY=https://registry.npmjs.org  # 覆盖内部更新使用的 npm registry
 ```
 
 ## 版本更新
@@ -234,7 +243,7 @@ npm run update:latest        # 升级到 npm latest（当前仍为 0.2.2-rc.1）
 
 ## GitHub Actions 自动更新与发布
 
-[`.github/workflows/update-dsh.yml`](.github/workflows/update-dsh.yml) 每 6 小时检查一次
+[`.github/workflows/update-dsh.yml`](.github/workflows/update-dsh.yml) 每小时检查一次
 [`deepseek-ai/deepseek-harness`](https://github.com/deepseek-ai/deepseek-harness) 的
 `dsh-v*` release。发现新 dsh 版本时自动：
 

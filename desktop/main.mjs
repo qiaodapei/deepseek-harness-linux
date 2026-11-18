@@ -13,6 +13,7 @@ import {
 import { spawn } from 'node:child_process'
 import {
   createWriteStream,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -21,6 +22,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { rm } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { format } from 'node:util'
 import {
@@ -29,6 +31,7 @@ import {
   downloadAssetToFile,
   ensureFreeSpace,
   fetchAssetText,
+  fetchLatestNpmVersion,
   fetchReleases,
   formatBytes,
   installAppImage,
@@ -39,12 +42,42 @@ import {
   selectLatestRelease,
   writeUpdateState,
 } from './updater.mjs'
+import {
+  DEFAULT_REGISTRY,
+  FALLBACK_REGISTRY,
+  activateRuntime,
+  clearRuntimeBroken,
+  installRuntimeVersion,
+  isValidRuntime,
+  markRuntimeBroken,
+  pruneRuntimeVersions,
+  readDshVersion,
+  removeStaleRuntimeDirs,
+  resolveActiveRuntime,
+  resolveDataDir,
+  runtimeLayout,
+} from './runtime.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const runtimeDir = app.isPackaged ? join(process.resourcesPath, 'runtime') : ''
-const projectRoot =
+const bundledProjectRoot =
   process.env.DSH_DESKTOP_PROJECT_ROOT || (runtimeDir ? join(runtimeDir, 'app') : dirname(here))
+const dataDir = resolveDataDir()
+let activeRuntime = app.isPackaged
+  ? resolveActiveRuntime({ bundledRoot: bundledProjectRoot, dataDir })
+  : {
+      root: bundledProjectRoot,
+      version: readDshVersion(bundledProjectRoot) || app.getVersion(),
+      source: 'bundled',
+      layout: runtimeLayout(dataDir),
+    }
+let projectRoot = activeRuntime.root
 const serverCwd = process.env.DSH_DESKTOP_CWD || (app.isPackaged ? homedir() : projectRoot)
+const bundledPnpm = runtimeDir ? join(runtimeDir, 'app', 'node_modules', '.bin', 'pnpm') : ''
+const bundledNode = runtimeDir ? join(runtimeDir, 'node', 'bin', 'node') : process.execPath
+const runtimeRegistries = process.env.DSH_NPM_REGISTRY
+  ? [process.env.DSH_NPM_REGISTRY]
+  : [DEFAULT_REGISTRY, FALLBACK_REGISTRY]
 const staticDir = app.isPackaged ? join(process.resourcesPath, 'app.asar.unpacked', 'desktop') : here
 const splashFile = join(staticDir, 'splash.html')
 const iconFile = join(staticDir, 'assets', 'icon.png')
@@ -60,7 +93,7 @@ const updateTokenFile = join(
   'deepseek-harness',
   'github-token',
 )
-const updateCheckIntervalMs = 6 * 60 * 60 * 1000
+const updateCheckIntervalMs = 60 * 60 * 1000
 const updateCheckDelayMs = (() => {
   const value = Number(process.env.DSH_UPDATE_CHECK_DELAY_MS)
   return Number.isFinite(value) && value >= 0 ? value : 15_000
@@ -126,14 +159,27 @@ const log = (...args) =>
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function currentAppVersion() {
-  return process.env.DSH_UPDATE_CURRENT_VERSION || app.getVersion()
+  return process.env.DSH_UPDATE_CURRENT_VERSION || getInstalledDshVersion() || app.getVersion()
 }
 
 function getInstalledDshVersion() {
   if (!installedDshVersion) {
-    installedDshVersion = readInstalledDshVersion(projectRoot, app.getVersion())
+    installedDshVersion =
+      activeRuntime.version && activeRuntime.version !== 'unknown'
+        ? activeRuntime.version
+        : readInstalledDshVersion(projectRoot, app.getVersion())
   }
   return installedDshVersion
+}
+
+function useRuntime(runtime) {
+  activeRuntime = runtime
+  projectRoot = runtime.root
+  installedDshVersion =
+    (runtime.version && runtime.version !== 'unknown' ? runtime.version : '') ||
+    readDshVersion(runtime.root) ||
+    installedDshVersion
+  return runtime
 }
 
 function readUpdateToken() {
@@ -232,9 +278,9 @@ function updateEntryLabel() {
     if (total > 0) {
       return `正在下载更新… ${Math.min(100, Math.floor((progress / total) * 100))}%`
     }
-    return `正在下载更新… ${formatBytes(progress)}`
+    return '正在下载 dsh 更新…'
   }
-  if (phase === 'installing') return '正在安装更新…'
+  if (phase === 'installing') return '正在安装 dsh 更新…'
   if (phase === 'available' && latest) return `安装更新 v${latest.version}…`
   if (phase === 'error') return '重新检查更新…'
   return '检查更新…'
@@ -256,6 +302,15 @@ function updateMenuTemplate() {
   ]
   if (phase === 'downloading') {
     items.push({ label: '取消下载', click: cancelUpdateDownload })
+  } else if (
+    phase === 'available' &&
+    updateStatus.latest?.appImage &&
+    updateStatus.latest?.shaAsset
+  ) {
+    items.push({
+      label: '下载完整安装包（可选）…',
+      click: () => downloadAndInstallFullUpdate(),
+    })
   }
   return items
 }
@@ -313,6 +368,77 @@ function refreshMenus() {
   updateProgressBar()
 }
 
+async function fetchLatestUpdateInfo({ manual = false, force = false, token = '' } = {}) {
+  let release = null
+  let githubError = null
+  try {
+    const result = await fetchReleases({
+      repo: updateRepo,
+      token,
+      etag: manual || force ? '' : updateState.etag || '',
+    })
+    if (result.notModified) {
+      release = updateState.latestRelease || null
+    } else {
+      updateState.etag = result.etag || ''
+      release = cacheRelease(selectLatestRelease(result.releases, '0.0.0'))
+      updateState.latestRelease = release
+    }
+  } catch (error) {
+    githubError = error
+    release = updateState.latestRelease || null
+    log('release check failed:', error.message)
+  }
+
+  let npm = null
+  let npmError = null
+  try {
+    npm = await fetchLatestNpmVersion({ registries: runtimeRegistries })
+  } catch (error) {
+    npmError = error
+    log('npm version check failed:', error.message)
+  }
+
+  let version = release?.version || null
+  if (npm?.version && (!version || compareVersions(npm.version, version) > 0)) {
+    version = npm.version
+  }
+  if (!version) throw githubError || npmError || new Error('无法获取最新版本。')
+
+  // The Release workflow can lag a few minutes behind npm. Fetch fresh notes
+  // when npm already knows about a newer version.
+  if (release?.version !== version && !manual && !force && !githubError) {
+    try {
+      const fresh = await fetchReleases({ repo: updateRepo, token, etag: '' })
+      if (!fresh.notModified) {
+        const freshRelease = cacheRelease(selectLatestRelease(fresh.releases, '0.0.0'))
+        updateState.etag = fresh.etag || ''
+        updateState.latestRelease = freshRelease
+        if (freshRelease?.version === version) release = freshRelease
+      }
+    } catch (error) {
+      log('release refresh failed:', error.message)
+    }
+  }
+
+  const matched = release?.version === version ? release : null
+  return {
+    latest: {
+      version,
+      name: matched?.name || `dsh ${version}`,
+      url:
+        matched?.url || `https://www.npmjs.com/package/@deepseek-ai/dsh/v/${version}`,
+      notes: matched?.notes || '',
+      publishedAt: matched?.publishedAt || null,
+      prerelease: matched ? matched.prerelease : true,
+      appImage: matched?.appImage || null,
+      shaAsset: matched?.shaAsset || null,
+      npmRegistry: npm?.registry || '',
+    },
+    npm,
+  }
+}
+
 async function checkForUpdates({ manual = false, force = false } = {}) {
   if (manual) showWindow()
   if (updateStatus.phase === 'downloading' || updateStatus.phase === 'installing') {
@@ -340,34 +466,21 @@ async function checkForUpdates({ manual = false, force = false } = {}) {
     const token = readUpdateToken()
     const current = currentAppVersion()
     try {
-      const result = await fetchReleases({
-        repo: updateRepo,
-        token,
-        etag: manual || force ? '' : updateState.etag || '',
-      })
-
-      let latest = null
-      if (result.notModified) {
-        latest =
-          updateState.latest && compareVersions(updateState.latest.version, current) > 0
-            ? updateState.latest
-            : null
-      } else {
-        updateState.etag = result.etag || ''
-        updateState.latest = cacheRelease(selectLatestRelease(result.releases, '0.0.0'))
-        latest = selectLatestRelease(result.releases, current)
-      }
+      const { latest: newest } = await fetchLatestUpdateInfo({ manual, force, token })
 
       updateState.lastCheck = Date.now()
+      updateState.latest =
+        compareVersions(newest.version, current) > 0 ? cacheRelease(newest) : null
       await persistUpdateState()
 
       log(
         'update check:',
         `current=v${current}`,
-        latest ? `available=v${latest.version}` : 'up-to-date',
+        updateState.latest ? `available=v${newest.version}` : 'up-to-date',
       )
 
-      if (latest) {
+      if (updateState.latest) {
+        const latest = updateState.latest
         setUpdateStatus({ phase: 'available', latest, error: null })
         if (manual) {
           await showUpdateAvailableDialog()
@@ -416,26 +529,39 @@ async function showUpdateAvailableDialog() {
   showWindow()
 
   const current = currentAppVersion()
-  const currentDsh = getInstalledDshVersion()
-  const currentLabel =
-    currentDsh && currentDsh !== current ? `${current}（内置 dsh ${currentDsh}）` : current
-  const size = latest.appImage.size ? formatBytes(latest.appImage.size) : '未知大小'
-  const lines = [
-    `当前版本：${currentLabel}`,
-    `新版本：${latest.version}`,
-    `更新包：${latest.appImage.name}（${size}）`,
-  ]
+  const shellVersion = app.getVersion()
+  const lines = [`当前版本：${current}`]
+  if (shellVersion !== current) lines.push(`客户端壳：${shellVersion}`)
+  lines.push(`新版本：${latest.version}`)
+  lines.push(
+    '更新方式：内部更新（npm），只下载 dsh 和变化的依赖，无需重新下载完整 AppImage。',
+  )
+  if (latest.appImage?.name) {
+    lines.push(
+      `完整安装包：${latest.appImage.name}（${
+        latest.appImage.size ? formatBytes(latest.appImage.size) : '未知大小'
+      }）`,
+    )
+  }
   if (latest.publishedAt) {
     lines.push(`发布日期：${new Date(latest.publishedAt).toLocaleString()}`)
   }
-  lines.push('', '下载完成后会自动重启客户端。', '', '更新说明：', plainNotes(latest.notes))
+  lines.push(
+    '',
+    '安装完成后会自动重启 dsh 服务，客户端窗口不会退出。',
+    '',
+    '更新说明：',
+    plainNotes(latest.notes),
+  )
 
+  const buttons = ['立即更新', '稍后', '查看发布说明']
+  if (latest.appImage) buttons.push('下载完整安装包')
   const { response } = await showMessageBox({
     type: 'info',
     title: '发现新版本',
     message: `DeepSeek Harness ${latest.version} 可用`,
     detail: lines.join('\n'),
-    buttons: ['下载并安装', '稍后', '查看发布说明'],
+    buttons,
     defaultId: 0,
     cancelId: 1,
     noLink: true,
@@ -443,15 +569,19 @@ async function showUpdateAvailableDialog() {
 
   if (response === 0) await downloadAndInstallUpdate()
   else if (response === 2) shell.openExternal(latest.url)
+  else if (response === 3) await downloadAndInstallFullUpdate()
 }
 
 async function showUpToDateDialog() {
   showWindow()
   const current = currentAppVersion()
-  const currentDsh = getInstalledDshVersion()
   const detail = [`当前版本：${current}`]
-  if (currentDsh !== current) detail.push(`内置 dsh：${currentDsh}`)
-  detail.push(`更新源：https://github.com/${updateRepo}/releases`)
+  if (app.getVersion() !== current) detail.push(`客户端壳：${app.getVersion()}`)
+  detail.push(
+    `运行方式：${activeRuntime.source === 'managed' ? '用户目录 runtime（内部更新）' : 'AppImage 内置 runtime'}`,
+    `npm registry：${runtimeRegistries.join(' / ')}`,
+    `更新源：https://github.com/${updateRepo}/releases`,
+  )
 
   const { response } = await showMessageBox({
     type: 'info',
@@ -527,15 +657,15 @@ async function showDownloadErrorDialog(error, path) {
 
   const { response } = await showMessageBox({
     type: 'error',
-    title: '更新失败',
-    message: '无法下载或安装更新',
+    title: '完整安装包更新失败',
+    message: '无法下载或安装完整 AppImage',
     detail,
     buttons: ['重试', '打开 Release 页面', '关闭'],
     defaultId: 0,
     cancelId: 2,
     noLink: true,
   })
-  if (response === 0) downloadAndInstallUpdate()
+  if (response === 0) downloadAndInstallFullUpdate()
   else if (response === 1) {
     shell.openExternal(latest?.url || `https://github.com/${updateRepo}/releases`)
   }
@@ -543,6 +673,56 @@ async function showDownloadErrorDialog(error, path) {
 
 function cancelUpdateDownload() {
   if (downloadController) downloadController.abort()
+}
+
+function runtimeInstallLogger() {
+  let lastAt = 0
+  return (line) => {
+    const now = Date.now()
+    if (now - lastAt < 2000 && !/(error|warn|fail)/i.test(line)) return
+    lastAt = now
+    log('pnpm:', line)
+  }
+}
+
+async function installRuntimeUpdate(version, signal) {
+  if (!app.isPackaged) {
+    throw new Error('开发模式下不执行内部更新，请使用 npm run update。')
+  }
+  if (!bundledPnpm || !existsSync(bundledPnpm)) {
+    throw new Error(`找不到内置 pnpm：${bundledPnpm || '(未打包)'}`)
+  }
+
+  const layout = runtimeLayout(dataDir)
+  const target = join(layout.versions, version)
+  if (isValidRuntime(target) && readDshVersion(target) === version) {
+    log('runtime already installed:', version)
+    return { root: target, version, reused: true }
+  }
+
+  const failures = []
+  for (const registry of runtimeRegistries) {
+    if (signal?.aborted) throw new Error('已取消。')
+    try {
+      log('installing dsh runtime:', version, 'from', registry)
+      const result = await installRuntimeVersion({
+        dataDir,
+        version,
+        pnpmBin: bundledPnpm,
+        nodeBin: bundledNode,
+        registry,
+        signal,
+        onLine: runtimeInstallLogger(),
+      })
+      updateState.runtimeRegistry = registry
+      return result
+    } catch (error) {
+      if (signal?.aborted) throw error
+      failures.push(`${registry}: ${error.message}`)
+      log('runtime install failed:', registry, error.message)
+    }
+  }
+  throw new Error(`无法安装 dsh ${version}。\n${failures.join('\n')}`)
 }
 
 async function downloadAndInstallUpdate() {
@@ -560,11 +740,149 @@ async function downloadAndInstallUpdate() {
     return
   }
 
-  if (!latest.shaAsset) {
+  const controller = new AbortController()
+  downloadController = controller
+  lastUpdateUiAt = 0
+  setUpdateStatus({
+    phase: 'downloading',
+    latest,
+    error: null,
+    progress: 0,
+    total: 0,
+  })
+
+  try {
+    const result = await installRuntimeUpdate(latest.version, controller.signal)
+    if (controller.signal.aborted) throw new Error('已取消。')
+
+    setUpdateStatus({ phase: 'installing', latest, progress: 1, total: 1 })
+    const previousVersion = activeRuntime.source === 'managed' ? activeRuntime.version : ''
+    await activateRuntime(dataDir, latest.version)
+    useRuntime(resolveActiveRuntime({ bundledRoot: bundledProjectRoot, dataDir }))
+    if (activeRuntime.source !== 'managed' || activeRuntime.version !== latest.version) {
+      throw new Error(`切换到 dsh ${latest.version} 失败。`)
+    }
+
+    updateState.installedVersion = latest.version
+    updateState.latest = null
+    updateState.runtime = {
+      ...(updateState.runtime || {}),
+      version: latest.version,
+      previousVersion,
+      installedAt: Date.now(),
+      source: 'npm',
+      registry: result.registry || updateState.runtimeRegistry || '',
+    }
+    await persistUpdateState()
+    log('dsh runtime updated:', latest.version, '->', activeRuntime.root)
+
+    try {
+      await restartServer({ rethrow: true })
+      await clearRuntimeBroken(dataDir, latest.version).catch(() => {})
+    } catch (error) {
+      log('new runtime failed to start:', error.message)
+      await markRuntimeBroken(dataDir, latest.version).catch(() => {})
+      const layout = runtimeLayout(dataDir)
+      if (previousVersion && isValidRuntime(join(layout.versions, previousVersion))) {
+        await activateRuntime(dataDir, previousVersion)
+      } else {
+        await rm(join(layout.root, 'current'), { force: true }).catch(() => {})
+      }
+      useRuntime(resolveActiveRuntime({ bundledRoot: bundledProjectRoot, dataDir }))
+      await restartServer().catch(() => {})
+      updateState.runtime = {
+        ...(updateState.runtime || {}),
+        version: activeRuntime.version,
+        brokenVersion: latest.version,
+      }
+      await persistUpdateState()
+      throw new Error(
+        `dsh ${latest.version} 启动失败，已回退到 ${activeRuntime.version}。\n${error.message}`,
+      )
+    }
+
+    setUpdateStatus({ phase: 'idle', latest: null, progress: 0, total: 0, error: null })
+    notify('dsh 已更新', `已更新到 ${latest.version}，dsh 服务已重启。`)
+    pruneRuntimeVersions(dataDir, [latest.version, previousVersion].filter(Boolean)).catch((error) =>
+      log('failed to prune old runtime versions:', error.message),
+    )
+    setTimeout(() => checkForUpdates({ automatic: true, force: true }), 5000).unref?.()
+  } catch (error) {
+    const aborted =
+      error?.code === 'aborted' || error?.name === 'AbortError' || controller.signal.aborted
+    log('internal update failed:', error.message)
+    if (aborted) {
+      setUpdateStatus({ phase: 'available', latest, progress: 0, total: 0, error: null })
+      notify('更新已取消', 'dsh 更新已停止。', () => {
+        showWindow()
+        showUpdateAvailableDialog()
+      })
+    } else {
+      setUpdateStatus({ phase: 'error', latest, progress: 0, total: 0, error: error.message })
+      await showInternalUpdateErrorDialog(error)
+    }
+  } finally {
+    if (downloadController === controller) downloadController = null
+  }
+}
+
+async function showInternalUpdateErrorDialog(error) {
+  showWindow()
+  const latest = updateStatus.latest
+  const buttons = ['重试内部更新']
+  if (latest?.appImage) buttons.push('下载完整安装包')
+  buttons.push('查看发布说明', '关闭')
+
+  const detail = [
+    String(error?.message || error),
+    '',
+    `运行目录：${runtimeLayout(dataDir).root}`,
+    `npm registry：${runtimeRegistries.join(' / ')}`,
+    latest ? `新版本：${latest.version}` : '',
+    '',
+    '内部更新失败时，可以重试，或下载完整 AppImage。',
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  const { response } = await showMessageBox({
+    type: 'error',
+    title: '内部更新失败',
+    message: '无法更新 dsh runtime',
+    detail,
+    buttons,
+    defaultId: 0,
+    cancelId: buttons.length - 1,
+    noLink: true,
+  })
+
+  if (response === 0) downloadAndInstallUpdate()
+  else if (response === 1 && latest?.appImage) downloadAndInstallFullUpdate()
+  else if (response === (latest?.appImage ? 2 : 1)) {
+    shell.openExternal(latest?.url || `https://github.com/${updateRepo}/releases`)
+  }
+}
+
+async function downloadAndInstallFullUpdate() {
+  const latest = updateStatus.latest
+  if (!latest || downloadController) return
+
+  if (compareVersions(latest.version, currentAppVersion()) <= 0) {
+    setUpdateStatus({ phase: 'idle', latest: null, progress: 0, total: 0 })
+    await showMessageBox({
+      type: 'info',
+      title: '无需更新',
+      message: '当前已是最新版本。',
+      buttons: ['确定'],
+    })
+    return
+  }
+
+  if (!latest.appImage || !latest.shaAsset) {
     await showMessageBox({
       type: 'error',
-      title: '更新失败',
-      message: '该 Release 缺少 SHA256 校验文件，已中止下载。',
+      title: '无法下载完整安装包',
+      message: '该版本还没有发布完整的 AppImage。',
       detail: latest.url,
       buttons: ['确定'],
     })
@@ -739,7 +1057,7 @@ function cleanupStaleUpdateFiles() {
 
 function hydrateCachedUpdate() {
   const cached = updateState.latest
-  if (!cached || !cached.version || !cached.appImage?.url || !cached.shaAsset?.url) return
+  if (!cached || !cached.version) return
   try {
     if (compareVersions(cached.version, currentAppVersion()) > 0) {
       updateStatus = { ...updateStatus, phase: 'available', latest: cached }
@@ -784,8 +1102,10 @@ function startServer() {
 
   const env = {
     ...process.env,
+    DSH_PNPM_BIN: bundledPnpm || process.env.DSH_PNPM_BIN || '',
     PATH: [
       join(projectRoot, 'node_modules', '.bin'),
+      join(projectRoot, 'bin'),
       runtimeDir ? join(runtimeDir, 'node', 'bin') : '',
       '/usr/local/bin',
       '/usr/bin',
@@ -1111,12 +1431,13 @@ function showAbout() {
     ? new Date(updateState.lastCheck).toLocaleString()
     : '尚未检查'
   const installedDsh = getInstalledDshVersion()
-  const detail = [`Version: ${app.getVersion()}`]
-  if (installedDsh !== app.getVersion()) detail.push(`dsh version: ${installedDsh}`)
+  const detail = [`dsh version: ${installedDsh}`]
+  if (app.getVersion() !== installedDsh) detail.push(`Shell version: ${app.getVersion()}`)
   detail.push(
+    `Runtime: ${activeRuntime.source === 'managed' ? 'managed (npm)' : 'bundled'} — ${projectRoot}`,
     `Update source: ${updateRepo}`,
+    `npm registry: ${runtimeRegistries.join(' / ')}`,
     `Last update check: ${lastCheck}`,
-    `Project: ${projectRoot}`,
     `Server: ${serverUrl || '(not running)'}`,
     `Server log: ${serverLog}`,
   )
@@ -1160,28 +1481,67 @@ async function loadApp() {
 }
 
 async function boot() {
+  let bootError = null
   try {
     await loadApp()
+  } catch (error) {
+    bootError = error
+    if (activeRuntime.source === 'managed') {
+      log('managed runtime failed to start, falling back to bundled:', error.message)
+      await stopServer().catch(() => {})
+      await markRuntimeBroken(dataDir, activeRuntime.version).catch((markError) =>
+        log('failed to mark runtime broken:', markError.message),
+      )
+      updateState.runtime = {
+        ...(updateState.runtime || {}),
+        brokenVersion: activeRuntime.version,
+      }
+      await persistUpdateState()
+      useRuntime(resolveActiveRuntime({ bundledRoot: bundledProjectRoot, dataDir }))
+      try {
+        await loadApp()
+        bootError = null
+        log('fell back to bundled runtime:', activeRuntime.version)
+      } catch (fallbackError) {
+        bootError = fallbackError
+      }
+    }
+  }
+
+  if (!bootError) {
+    // Only prune after a managed runtime has proven it can start. Pruning
+    // before boot could delete a good rollback copy when `current` points at
+    // a broken version.
+    if (app.isPackaged && activeRuntime.source === 'managed') {
+      await pruneRuntimeVersions(
+        dataDir,
+        [activeRuntime.version, updateState.runtime?.previousVersion].filter(Boolean),
+      ).catch((error) => log('failed to prune runtime versions:', error.message))
+    }
     if (smokePath) await runSmoke()
     else startAutoUpdateChecks()
-  } catch (error) {
-    log('boot failed:', error)
-    if (smokePath) {
-      console.error('[smoke] failed:', error)
-      await stopServer()
-      app.exit(1)
-      return
-    }
-    dialog.showErrorBox(
-      'DeepSeek Harness 启动失败',
-      `${error.message}\n\n日志：${serverLog}\n\n请检查 README 中的启动命令是否可用。`,
-    )
-    quitApp()
+    return
   }
+
+  log('boot failed:', bootError)
+  if (smokePath) {
+    console.error('[smoke] failed:', bootError)
+    await stopServer()
+    app.exit(1)
+    return
+  }
+  dialog.showErrorBox(
+    'DeepSeek Harness 启动失败',
+    `${bootError.message}\n\n日志：${serverLog}\n\n请检查 README 中的启动命令是否可用。`,
+  )
+  quitApp()
 }
 
-async function restartServer() {
-  if (restarting) return
+async function restartServer({ rethrow = false } = {}) {
+  if (restarting) {
+    if (rethrow) throw new Error('dsh 服务正在重启，请稍后重试。')
+    return
+  }
   restarting = true
   try {
     await stopServer()
@@ -1189,6 +1549,7 @@ async function restartServer() {
     await loadApp()
   } catch (error) {
     log('restart failed:', error)
+    if (rethrow) throw error
     dialog.showErrorBox('重启服务失败', `${error.message}\n\n日志：${serverLog}`)
   } finally {
     restarting = false
@@ -1251,6 +1612,9 @@ if (!gotLock) {
   app.on('second-instance', showWindow)
   app.whenReady().then(async () => {
     cleanupStaleUpdateFiles()
+    await removeStaleRuntimeDirs(dataDir).catch((error) =>
+      log('failed to clean stale runtime dirs:', error.message),
+    )
     hydrateCachedUpdate()
     buildMenu()
     createTray()
@@ -1258,7 +1622,7 @@ if (!gotLock) {
     refreshMenus()
     if (!smokePath) {
       powerMonitor.on('resume', () => {
-        if (autoCheckEnabled()) checkForUpdates({ automatic: true })
+        if (autoCheckEnabled()) checkForUpdates({ automatic: true, force: true })
       })
     }
     await boot()

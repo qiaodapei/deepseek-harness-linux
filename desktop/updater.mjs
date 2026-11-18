@@ -122,8 +122,11 @@ export function readUpdateState(file) {
     lastCheck: 0,
     etag: '',
     latest: null,
+    latestRelease: null,
     notifiedVersion: '',
     installedVersion: '',
+    runtime: null,
+    runtimeRegistry: '',
   }
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'))
@@ -208,6 +211,90 @@ export function selectLatestRelease(releases, currentVersion) {
     if (!latest || compareVersions(release.version, latest.version) > 0) latest = release
   }
   return latest
+}
+
+export const DEFAULT_NPM_REGISTRIES = [
+  'https://registry.npmmirror.com',
+  'https://registry.npmjs.org',
+]
+
+export function selectLatestNpmVersion(distTags) {
+  const tags = distTags && typeof distTags === 'object' ? distTags : {}
+  let latest = null
+  // `latest` can be a stable release while `next` is a newer prerelease, or
+  // the other way around. Consider both and take the highest semver.
+  for (const name of ['latest', 'next']) {
+    const version = parseVersion(tags[name])
+    if (!version) continue
+    if (!latest || compareVersions(version, latest) > 0) latest = version
+  }
+  return latest ? latest.raw : null
+}
+
+export async function fetchNpmDistTags({ registry, timeoutMs = 20_000, signal } = {}) {
+  if (!registry) throw new UpdateError('未配置 npm registry。', { code: 'npm-registry' })
+  const base = registry.replace(/\/+$/, '')
+  const url = `${base}/@deepseek-ai%2Fdsh`
+  const signals = [AbortSignal.timeout(timeoutMs)]
+  if (signal) signals.push(signal)
+
+  let response
+  try {
+    response = await fetch(url, {
+      headers: {
+        Accept: 'application/vnd.npm.install-v1+json',
+        'User-Agent': USER_AGENT,
+      },
+      signal: AbortSignal.any(signals),
+    })
+  } catch (error) {
+    if (signal?.aborted) throw error
+    throw new UpdateError(`无法连接 npm registry：${base}（${error.message}）`, {
+      code: 'npm-network',
+      cause: error,
+    })
+  }
+  if (!response.ok) {
+    throw new UpdateError(`npm registry 返回 HTTP ${response.status}：${base}`, {
+      code: 'npm-registry',
+      status: response.status,
+    })
+  }
+
+  let body
+  try {
+    body = await response.json()
+  } catch (error) {
+    throw new UpdateError(`npm registry 返回了无效数据：${base}`, {
+      code: 'npm-registry',
+      cause: error,
+    })
+  }
+  const tags = body && typeof body['dist-tags'] === 'object' ? body['dist-tags'] : {}
+  return { registry: base, tags }
+}
+
+export async function fetchLatestNpmVersion({
+  registries = DEFAULT_NPM_REGISTRIES,
+  timeoutMs = 20_000,
+  signal,
+} = {}) {
+  const errors = []
+  for (const registry of registries) {
+    if (signal?.aborted) throw new UpdateError('已取消。', { code: 'aborted' })
+    try {
+      const { registry: resolved, tags } = await fetchNpmDistTags({ registry, timeoutMs, signal })
+      const version = selectLatestNpmVersion(tags)
+      if (version) return { version, registry: resolved, tags }
+      errors.push(`${resolved}: 没有可用的 dist-tag`)
+    } catch (error) {
+      if (signal?.aborted) throw error
+      errors.push(error.message)
+    }
+  }
+  throw new UpdateError(`无法从 npm 获取最新 dsh 版本。\n${errors.join('\n')}`, {
+    code: 'npm-registry',
+  })
 }
 
 function requestHeaders(token, accept) {

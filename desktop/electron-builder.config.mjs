@@ -9,6 +9,7 @@ export default {
   files: [
     'desktop/main.mjs',
     'desktop/updater.mjs',
+    'desktop/runtime.mjs',
     'desktop/splash.html',
     'desktop/assets/**/*',
     'package.json',

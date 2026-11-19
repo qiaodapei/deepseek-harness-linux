@@ -108,6 +108,12 @@ app.setName('DeepSeek Harness')
 app.commandLine.appendSwitch('class', 'deepseek-harness')
 if (process.env.WAYLAND_DISPLAY && process.env.XDG_SESSION_TYPE !== 'x11') {
   app.commandLine.appendSwitch('ozone-platform', 'wayland')
+  // Chromium's native Wayland backend only talks to the compositor's
+  // text-input protocol when this switch is present. Without it ibus/fcitx
+  // never receive composition events, so Chinese/Japanese/Korean input
+  // silently degrades to plain ASCII key presses.
+  app.commandLine.appendSwitch('enable-wayland-ime')
+  app.commandLine.appendSwitch('wayland-text-input-version', '3')
 } else {
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto')
 }

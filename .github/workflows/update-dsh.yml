@@ -257,8 +257,8 @@ jobs:
             echo
             echo "无 FUSE 环境：\`./${asset_name} --appimage-extract-and-run\`"
             echo
-            echo "客户端会自动检查新版本；也可以在托盘菜单或 **帮助 → 检查更新** 中手动检查。"
-            echo "默认通过 npm 内部更新 dsh，只下载变化的依赖；也可以在更新界面选择完整 AppImage。"
+            echo "客户端会自动检查新版本；也可以在标题栏 **应用 → 检查更新** 或托盘菜单中手动检查。"
+            echo "默认通过 npm 内部更新 dsh，只下载变化的依赖；完整安装包可在托盘菜单中选择下载。"
             echo "dsh 用户数据仍保存在 \`~/.dsh\`，内部 runtime 位于 \`~/.local/share/deepseek-harness/runtime/\`。"
             echo
             echo "上游 release：https://github.com/deepseek-ai/deepseek-harness/releases/tag/${UPSTREAM_TAG}"

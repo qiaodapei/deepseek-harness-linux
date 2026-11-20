@@ -1254,6 +1254,7 @@ function trayMenuTemplate() {
     { label: '在浏览器中打开', click: openInBrowser },
     { type: 'separator' },
     ...updateMenuTemplate({ fullPackage: true }),
+    autoCheckMenuItem(),
     { type: 'separator' },
     { label: '重启服务', click: () => restartServer() },
     { label: '关于', click: showAbout },

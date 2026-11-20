@@ -9,15 +9,20 @@ import {
   screen,
   shell,
   powerMonitor,
+  ipcMain,
 } from 'electron'
 import { spawn } from 'node:child_process'
 import {
   createWriteStream,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -79,6 +84,7 @@ const runtimeRegistries = process.env.DSH_NPM_REGISTRY
   ? [process.env.DSH_NPM_REGISTRY]
   : [DEFAULT_REGISTRY, FALLBACK_REGISTRY]
 const staticDir = app.isPackaged ? join(process.resourcesPath, 'app.asar.unpacked', 'desktop') : here
+const preloadFile = app.isPackaged ? join(app.getAppPath(), 'desktop', 'preload.cjs') : join(here, 'preload.cjs')
 const splashFile = join(staticDir, 'splash.html')
 const iconFile = join(staticDir, 'assets', 'icon.png')
 const trayIconFile = join(staticDir, 'assets', 'tray.png')
@@ -225,6 +231,42 @@ function cacheRelease(release) {
 function setUpdateStatus(patch) {
   updateStatus = { ...updateStatus, ...patch }
   refreshMenus()
+  sendUpdateStatusToRenderer()
+}
+
+// Serializable update-state view for the in-window update dialog (notes are
+// flattened to plain text; the raw markdown never reaches the page).
+function updateStatusSnapshot() {
+  const { phase, latest, error, progress, total } = updateStatus
+  return {
+    phase,
+    error: error ?? null,
+    progress,
+    total,
+    current: currentAppVersion(),
+    latest: latest
+      ? { ...latest, notes: plainNotes(latest.notes) }
+      : null,
+  }
+}
+
+function sendUpdateStatusToRenderer() {
+  if (win === null || win.isDestroyed()) return
+  try {
+    win.webContents.send('dsh-desktop:update-status', updateStatusSnapshot())
+  } catch {}
+}
+
+// Opens the in-window update dialog (rendered by the preload overlay).
+function showUpdateOverlay() {
+  showWindow()
+  if (win === null || win.isDestroyed()) return
+  try {
+    win.webContents.send('dsh-desktop:update-dialog', {
+      open: true,
+      status: updateStatusSnapshot(),
+    })
+  } catch {}
 }
 
 function reportUpdateProgress(received, total) {
@@ -234,6 +276,7 @@ function reportUpdateProgress(received, total) {
   if (now - lastUpdateUiAt >= 500) {
     lastUpdateUiAt = now
     refreshMenus()
+    sendUpdateStatusToRenderer()
   }
 }
 
@@ -292,14 +335,14 @@ function updateEntryLabel() {
   return '检查更新…'
 }
 
-function updateMenuTemplate() {
+function updateMenuTemplate({ fullPackage = false } = {}) {
   const { phase } = updateStatus
   const items = [
     {
       label: updateEntryLabel(),
       enabled: !['checking', 'installing', 'downloading'].includes(phase),
       click: () => {
-        if (phase === 'available') showUpdateAvailableDialog()
+        if (phase === 'available') showUpdateOverlay()
         else if (!['checking', 'installing', 'downloading'].includes(phase)) {
           checkForUpdates({ manual: true, force: true })
         }
@@ -309,6 +352,7 @@ function updateMenuTemplate() {
   if (phase === 'downloading') {
     items.push({ label: '取消下载', click: cancelUpdateDownload })
   } else if (
+    fullPackage &&
     phase === 'available' &&
     updateStatus.latest?.appImage &&
     updateStatus.latest?.shaAsset
@@ -448,14 +492,7 @@ async function fetchLatestUpdateInfo({ manual = false, force = false, token = ''
 async function checkForUpdates({ manual = false, force = false } = {}) {
   if (manual) showWindow()
   if (updateStatus.phase === 'downloading' || updateStatus.phase === 'installing') {
-    if (manual) {
-      await showMessageBox({
-        type: 'info',
-        title: '更新正在进行中',
-        message: '请等待当前更新完成。',
-        buttons: ['确定'],
-      })
-    }
+    if (manual) showUpdateOverlay()
     return null
   }
   if (checkPromise) return checkPromise
@@ -467,6 +504,7 @@ async function checkForUpdates({ manual = false, force = false } = {}) {
   setUpdateStatus({ phase: 'checking', error: null })
   updateState.lastAttempt = Date.now()
   await persistUpdateState()
+  if (manual) showUpdateOverlay()
 
   checkPromise = (async () => {
     const token = readUpdateToken()
@@ -489,24 +527,20 @@ async function checkForUpdates({ manual = false, force = false } = {}) {
         const latest = updateState.latest
         setUpdateStatus({ phase: 'available', latest, error: null })
         if (manual) {
-          await showUpdateAvailableDialog()
+          showUpdateOverlay()
         } else if (updateState.notifiedVersion !== latest.version) {
           updateState.notifiedVersion = latest.version
           await persistUpdateState()
           notify(
             '发现 DeepSeek Harness 更新',
             `v${latest.version} 可用，当前为 v${current}。点击查看并安装。`,
-            () => {
-              showWindow()
-              showUpdateAvailableDialog()
-            },
+            () => showUpdateOverlay(),
           )
         }
         return latest
       }
 
       setUpdateStatus({ phase: 'idle', latest: null, error: null })
-      if (manual) await showUpToDateDialog()
       return null
     } catch (error) {
       log('update check failed:', error.message)
@@ -517,7 +551,6 @@ async function checkForUpdates({ manual = false, force = false } = {}) {
         }
       } catch {}
       setUpdateStatus({ phase: 'error', latest: cached, error: error.message })
-      if (manual) await showUpdateErrorDialog(error)
       return null
     }
   })()
@@ -527,126 +560,6 @@ async function checkForUpdates({ manual = false, force = false } = {}) {
   } finally {
     checkPromise = null
   }
-}
-
-async function showUpdateAvailableDialog() {
-  const latest = updateStatus.latest
-  if (!latest) return
-  showWindow()
-
-  const current = currentAppVersion()
-  const shellVersion = app.getVersion()
-  const lines = [`当前版本：${current}`]
-  if (shellVersion !== current) lines.push(`客户端壳：${shellVersion}`)
-  lines.push(`新版本：${latest.version}`)
-  lines.push(
-    '更新方式：内部更新（npm），只下载 dsh 和变化的依赖，无需重新下载完整 AppImage。',
-  )
-  if (latest.appImage?.name) {
-    lines.push(
-      `完整安装包：${latest.appImage.name}（${
-        latest.appImage.size ? formatBytes(latest.appImage.size) : '未知大小'
-      }）`,
-    )
-  }
-  if (latest.publishedAt) {
-    lines.push(`发布日期：${new Date(latest.publishedAt).toLocaleString()}`)
-  }
-  lines.push(
-    '',
-    '安装完成后会自动重启 dsh 服务，客户端窗口不会退出。',
-    '',
-    '更新说明：',
-    plainNotes(latest.notes),
-  )
-
-  const buttons = ['立即更新', '稍后', '查看发布说明']
-  if (latest.appImage) buttons.push('下载完整安装包')
-  const { response } = await showMessageBox({
-    type: 'info',
-    title: '发现新版本',
-    message: `DeepSeek Harness ${latest.version} 可用`,
-    detail: lines.join('\n'),
-    buttons,
-    defaultId: 0,
-    cancelId: 1,
-    noLink: true,
-  })
-
-  if (response === 0) await downloadAndInstallUpdate()
-  else if (response === 2) shell.openExternal(latest.url)
-  else if (response === 3) await downloadAndInstallFullUpdate()
-}
-
-async function showUpToDateDialog() {
-  showWindow()
-  const current = currentAppVersion()
-  const detail = [`当前版本：${current}`]
-  if (app.getVersion() !== current) detail.push(`客户端壳：${app.getVersion()}`)
-  detail.push(
-    `运行方式：${activeRuntime.source === 'managed' ? '用户目录 runtime（内部更新）' : 'AppImage 内置 runtime'}`,
-    `npm registry：${runtimeRegistries.join(' / ')}`,
-    `更新源：https://github.com/${updateRepo}/releases`,
-  )
-
-  const { response } = await showMessageBox({
-    type: 'info',
-    title: '检查更新',
-    message: '当前已是最新版本',
-    detail: detail.join('\n'),
-    buttons: ['确定', '打开 Release 页面'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
-  })
-  if (response === 1) shell.openExternal(`https://github.com/${updateRepo}/releases`)
-}
-
-async function showUpdateErrorDialog(error) {
-  showWindow()
-  const token = readUpdateToken()
-  const detail = [
-    String(error?.message || error),
-    '',
-    `更新源：https://github.com/${updateRepo}/releases`,
-    token
-      ? '已读取 GitHub token。'
-      : `未配置 GitHub token。如果仓库是私有的，请把只读 token 保存到：\n${updateTokenFile}`,
-  ].join('\n')
-
-  const { response } = await showMessageBox({
-    type: 'error',
-    title: '检查更新失败',
-    message: '无法检查更新',
-    detail,
-    buttons: ['重试', '打开 Release 页面', '关闭'],
-    defaultId: 0,
-    cancelId: 2,
-    noLink: true,
-  })
-  if (response === 0) checkForUpdates({ manual: true, force: true })
-  else if (response === 1) shell.openExternal(`https://github.com/${updateRepo}/releases`)
-}
-
-async function showDownloadedDialog(release, path) {
-  showWindow()
-  const mode = app.isPackaged ? '当前 AppImage 所在目录不可写' : '当前是开发模式（npm run desktop）'
-  const { response } = await showMessageBox({
-    type: 'info',
-    title: '更新已下载',
-    message: `DeepSeek Harness ${release.version} 已下载`,
-    detail: [
-      `文件：${path}`,
-      `${mode}，无法自动替换正在运行的客户端。`,
-      '退出客户端后，用这个文件替换原来的 AppImage 即可。',
-    ].join('\n'),
-    buttons: ['打开所在文件夹', '查看发布说明', '关闭'],
-    defaultId: 0,
-    cancelId: 2,
-    noLink: true,
-  })
-  if (response === 0) shell.showItemInFolder(path)
-  else if (response === 1) shell.openExternal(release.url)
 }
 
 async function showDownloadErrorDialog(error, path) {
@@ -819,53 +732,13 @@ async function downloadAndInstallUpdate() {
     log('internal update failed:', error.message)
     if (aborted) {
       setUpdateStatus({ phase: 'available', latest, progress: 0, total: 0, error: null })
-      notify('更新已取消', 'dsh 更新已停止。', () => {
-        showWindow()
-        showUpdateAvailableDialog()
-      })
+      notify('更新已取消', 'dsh 更新已停止。', () => showUpdateOverlay())
     } else {
       setUpdateStatus({ phase: 'error', latest, progress: 0, total: 0, error: error.message })
-      await showInternalUpdateErrorDialog(error)
+      showUpdateOverlay()
     }
   } finally {
     if (downloadController === controller) downloadController = null
-  }
-}
-
-async function showInternalUpdateErrorDialog(error) {
-  showWindow()
-  const latest = updateStatus.latest
-  const buttons = ['重试内部更新']
-  if (latest?.appImage) buttons.push('下载完整安装包')
-  buttons.push('查看发布说明', '关闭')
-
-  const detail = [
-    String(error?.message || error),
-    '',
-    `运行目录：${runtimeLayout(dataDir).root}`,
-    `npm registry：${runtimeRegistries.join(' / ')}`,
-    latest ? `新版本：${latest.version}` : '',
-    '',
-    '内部更新失败时，可以重试，或下载完整 AppImage。',
-  ]
-    .filter(Boolean)
-    .join('\n')
-
-  const { response } = await showMessageBox({
-    type: 'error',
-    title: '内部更新失败',
-    message: '无法更新 dsh runtime',
-    detail,
-    buttons,
-    defaultId: 0,
-    cancelId: buttons.length - 1,
-    noLink: true,
-  })
-
-  if (response === 0) downloadAndInstallUpdate()
-  else if (response === 1 && latest?.appImage) downloadAndInstallFullUpdate()
-  else if (response === (latest?.appImage ? 2 : 1)) {
-    shell.openExternal(latest?.url || `https://github.com/${updateRepo}/releases`)
   }
 }
 
@@ -962,10 +835,7 @@ async function downloadAndInstallFullUpdate() {
     log('update failed:', error.message)
     if (aborted) {
       setUpdateStatus({ phase: 'available', latest, progress: 0, total: 0, error: null })
-      notify('更新已取消', '下载已停止。', () => {
-        showWindow()
-        showUpdateAvailableDialog()
-      })
+      notify('更新已取消', '下载已停止。', () => showUpdateOverlay())
     } else {
       setUpdateStatus({ phase: 'error', latest, progress: 0, total: 0, error: error.message })
       await showDownloadErrorDialog(error, destination)
@@ -1307,7 +1177,14 @@ function createWindow() {
     title: 'DeepSeek Harness',
     backgroundColor: '#0b1220',
     autoHideMenuBar: true,
+    ...(process.platform === 'linux'
+      ? {
+          titleBarStyle: 'hidden',
+          titleBarOverlay: { color: '#0b1220', symbolColor: '#e6e9f0', height: 40 },
+        }
+      : {}),
     webPreferences: {
+      preload: preloadFile,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -1375,7 +1252,7 @@ function trayMenuTemplate() {
     { label: '打开主窗口', click: showWindow },
     { label: '在浏览器中打开', click: openInBrowser },
     { type: 'separator' },
-    ...updateMenuTemplate(),
+    ...updateMenuTemplate({ fullPackage: true }),
     { type: 'separator' },
     { label: '重启服务', click: () => restartServer() },
     { label: '关于', click: showAbout },
@@ -1391,6 +1268,160 @@ function createTray() {
   tray.on('click', showWindow)
   tray.on('double-click', showWindow)
   log('tray created')
+}
+
+function isMainWindowSender(event) {
+  return win !== null && !win.isDestroyed() && event.sender === win.webContents
+}
+
+function commandTargetPath() {
+  return join(projectRoot, 'bin', 'dsh')
+}
+
+function commandLinkPath() {
+  return join(homedir(), '.local', 'bin', 'dsh')
+}
+
+async function showCommandManager() {
+  showWindow()
+  const target = commandTargetPath()
+  const link = commandLinkPath()
+  let current
+  try {
+    current = lstatSync(link).isSymbolicLink() ? readlinkSync(link) : link
+  } catch {}
+  const installed = current === target
+  const { response } = await showMessageBox({
+    type: 'info',
+    title: '管理 dsh 命令',
+    message: installed ? 'dsh 命令已安装到 ~/.local/bin。' : '把 dsh 命令安装到 ~/.local/bin。',
+    detail: [
+      `dsh 可执行文件：${target}`,
+      `命令链接：${link}`,
+      current && !installed ? `当前指向：${current}` : '',
+      '',
+      '安装后请确保 ~/.local/bin 已加入 PATH。',
+    ].filter(Boolean).join('\n'),
+    buttons: installed ? ['重新安装链接', '移除链接', '关闭'] : ['安装链接', '移除链接', '关闭'],
+    defaultId: 0,
+    cancelId: 2,
+  })
+  try {
+    if (response === 0) {
+      mkdirSync(dirname(link), { recursive: true })
+      try {
+        unlinkSync(link)
+      } catch {}
+      symlinkSync(target, link)
+      await showMessageBox({
+        type: 'info',
+        title: '管理 dsh 命令',
+        message: '已安装 dsh 命令。',
+        detail: `${link} → ${target}`,
+        buttons: ['确定'],
+      })
+    } else if (response === 1) {
+      try {
+        unlinkSync(link)
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+      await showMessageBox({
+        type: 'info',
+        title: '管理 dsh 命令',
+        message: '已移除 dsh 命令链接。',
+        buttons: ['确定'],
+      })
+    }
+  } catch (error) {
+    await showMessageBox({
+      type: 'error',
+      title: '管理 dsh 命令',
+      message: '操作失败。',
+      detail: error.message,
+      buttons: ['确定'],
+    })
+  }
+}
+
+function applicationMenuItems() {
+  return [
+    { label: '关于 DeepSeek Harness', click: () => showAbout() },
+    { type: 'separator' },
+    { label: '检查更新...', click: () => { void checkForUpdates({ manual: true, force: true }) } },
+    { label: '管理 dsh 命令...', click: () => { void showCommandManager() } },
+    { type: 'separator' },
+    {
+      label: '开发者工具',
+      accelerator: 'Ctrl+Shift+I',
+      click: () => {
+        if (win && !win.isDestroyed()) win.webContents.toggleDevTools()
+      },
+    },
+    { type: 'separator' },
+    { label: '退出', accelerator: 'Ctrl+Q', click: () => quitApp() },
+  ]
+}
+
+function editMenuItems() {
+  return [
+    { role: 'undo', label: '撤销', accelerator: 'Ctrl+Z' },
+    { role: 'redo', label: '重做', accelerator: 'Ctrl+Y' },
+    { type: 'separator' },
+    { role: 'cut', label: '剪切', accelerator: 'Ctrl+X' },
+    { role: 'copy', label: '复制', accelerator: 'Ctrl+C' },
+    { role: 'paste', label: '粘贴', accelerator: 'Ctrl+V' },
+    { role: 'delete', label: '删除' },
+    { type: 'separator' },
+    { role: 'selectAll', label: '全选', accelerator: 'Ctrl+A' },
+  ]
+}
+
+const captionMenus = {
+  application: applicationMenuItems,
+  edit: editMenuItems,
+}
+
+function registerDesktopIpc() {
+  ipcMain.handle('dsh-desktop:windows-menu', (event, name, x, y) => {
+    if (!isMainWindowSender(event)) throw new Error('desktop menu: rejected sender')
+    const buildItems = captionMenus[name]
+    if (buildItems === undefined) throw new Error('desktop menu: unknown menu')
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 100_000 || y > 100_000) {
+      throw new Error('desktop menu: invalid popup request')
+    }
+    const window = win
+    const zoom = window.webContents.getZoomFactor()
+    return new Promise((resolve) => {
+      Menu.buildFromTemplate(buildItems()).popup({
+        window,
+        x: Math.round(x * zoom),
+        y: Math.round(y * zoom),
+        callback: resolve,
+      })
+    })
+  })
+  ipcMain.on('dsh-desktop:update-action', (event, action) => {
+    if (!isMainWindowSender(event)) throw new Error('desktop update: rejected sender')
+    if (action === 'check') {
+      void checkForUpdates({ manual: true, force: true })
+    } else if (action === 'install') {
+      void downloadAndInstallUpdate()
+    } else if (action === 'cancel') {
+      cancelUpdateDownload()
+    } else if (action !== 'close') {
+      throw new Error('desktop update: unknown action')
+    }
+  })
+  ipcMain.on('dsh-desktop:titlebar-appearance', (event, color, symbolColor) => {
+    if (!isMainWindowSender(event)) return
+    const validColor = (value) => typeof value === 'string'
+      && /^(?:#[\da-f]{3,8}|rgba?\([\d.,%\s]+\))$/iu.test(value)
+    if (!validColor(color) || !validColor(symbolColor)) return
+    try {
+      win.setTitleBarOverlay({ color, symbolColor, height: 40 })
+    } catch {}
+  })
 }
 
 function buildMenu() {
@@ -1433,29 +1464,22 @@ function buildMenu() {
 }
 
 function showAbout() {
-  const lastCheck = updateState.lastCheck
-    ? new Date(updateState.lastCheck).toLocaleString()
-    : '尚未检查'
-  const installedDsh = getInstalledDshVersion()
-  const detail = [`dsh version: ${installedDsh}`]
-  if (app.getVersion() !== installedDsh) detail.push(`Shell version: ${app.getVersion()}`)
-  detail.push(
-    `Runtime: ${activeRuntime.source === 'managed' ? 'managed (npm)' : 'bundled'} — ${projectRoot}`,
-    `Update source: ${updateRepo}`,
-    `npm registry: ${runtimeRegistries.join(' / ')}`,
-    `Last update check: ${lastCheck}`,
-    `Server: ${serverUrl || '(not running)'}`,
-    `Server log: ${serverLog}`,
-  )
-  const options = {
-    type: 'info',
-    title: 'About DeepSeek Harness',
-    message: 'DeepSeek Harness Desktop',
-    detail: detail.join('\n'),
-    buttons: ['OK'],
-  }
-  if (win && !win.isDestroyed()) dialog.showMessageBox(win, options)
-  else dialog.showMessageBox(options)
+  showWindow()
+  if (win === null || win.isDestroyed()) return
+  let icon = ''
+  try {
+    icon = nativeImage.createFromPath(iconFile).toDataURL()
+  } catch {}
+  try {
+    win.webContents.send('dsh-desktop:about-dialog', {
+      name: 'DeepSeek Harness',
+      tagline: 'DeepSeek Harness 桌面客户端',
+      version: app.getVersion(),
+      dshVersion: getInstalledDshVersion() || currentAppVersion(),
+      copyright: `© ${new Date().getFullYear()} DeepSeek Harness`,
+      icon,
+    })
+  } catch {}
 }
 
 function handleServerCrash(code, signal) {
@@ -1622,6 +1646,7 @@ if (!gotLock) {
       log('failed to clean stale runtime dirs:', error.message),
     )
     hydrateCachedUpdate()
+    registerDesktopIpc()
     buildMenu()
     createTray()
     createWindow()

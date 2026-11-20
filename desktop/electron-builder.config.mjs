@@ -8,6 +8,7 @@ export default {
   },
   files: [
     'desktop/main.mjs',
+    'desktop/preload.cjs',
     'desktop/updater.mjs',
     'desktop/runtime.mjs',
     'desktop/splash.html',

@@ -10,6 +10,7 @@ import {
   shell,
   powerMonitor,
   ipcMain,
+  session,
 } from 'electron'
 import { spawn } from 'node:child_process'
 import {
@@ -1501,8 +1502,30 @@ function handleServerCrash(code, signal) {
     .catch(() => {})
 }
 
+// dsh web mints one auth cookie per server instance, named after the random
+// ephemeral port and valid for 30 days on 127.0.0.1. Nothing expires them, so
+// they accumulate across launches; once enough pile up every request exceeds
+// the server's header-size limit, it answers 431, and the window stays blank
+// forever. Drop them all before (re)loading the app — the load URL carries a
+// fresh token and the server re-issues its cookie via a 303 redirect.
+async function pruneStaleAuthCookies() {
+  try {
+    const cookies = await session.defaultSession.cookies.get({ domain: '127.0.0.1' })
+    const stale = cookies.filter((cookie) => cookie.name.startsWith('dsh-auth-'))
+    for (const cookie of stale) {
+      await session.defaultSession.cookies
+        .remove(`http://127.0.0.1${cookie.path}`, cookie.name)
+        .catch(() => {})
+    }
+    if (stale.length > 0) log(`pruned ${stale.length} stale dsh-auth cookie(s)`)
+  } catch (error) {
+    log('failed to prune dsh-auth cookies:', error.message)
+  }
+}
+
 async function loadApp() {
   if (!win || win.isDestroyed()) return
+  await pruneStaleAuthCookies()
   const url = await startServer()
   await waitForHttp(url)
   serverUrl = url

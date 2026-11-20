@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness",
-  "version": "0.2.2-rc.5",
+  "version": "0.2.2-rc.3",
   "private": true,
   "description": "DeepSeek Harness (dsh) local workspace: pinned CLI, version updates, and profile plugin management",
   "license": "MIT",
@@ -29,13 +29,13 @@
     "link": "npm link"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh": "0.2.2-rc.5",
+    "@deepseek-ai/dsh": "0.2.2-rc.3",
     "electron": "45.3.2",
     "electron-builder": "26.18.0",
     "pnpm": "12.21.0"
   },
   "allowScripts": {
-    "@deepseek-ai/dsh-subprocess-local@0.2.2-rc.5": true,
+    "@deepseek-ai/dsh-subprocess-local@0.2.2-rc.3": true,
     "node-pty@1.2.0-beta.15": true,
     "koffi@3.1.1": true,
     "protobufjs@7.6.6": true,

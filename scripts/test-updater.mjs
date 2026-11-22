@@ -117,6 +117,12 @@ assert.equal(formatBytes(355 * 1024 * 1024), '355 MB')
 
 assert.equal(selectLatestNpmVersion({ latest: '0.2.2-rc.1', next: '0.2.2-rc.5' }), '0.2.2-rc.5')
 assert.equal(selectLatestNpmVersion({ latest: '0.2.3', next: '0.2.3-rc.5' }), '0.2.3')
+assert.equal(
+  selectLatestNpmVersion({ latest: '0.2.2-rc.5', next: '0.2.2-rc.5', alpha: '0.2.3-alpha.2' }),
+  '0.2.3-alpha.2',
+)
+assert.equal(selectLatestNpmVersion({ latest: '0.2.3-alpha.2', alpha: '0.2.2-rc.5' }), '0.2.3-alpha.2')
+assert.equal(selectLatestNpmVersion({ alpha: '0.2.1-alpha.10', latest: '0.2.1-alpha.2' }), '0.2.1-alpha.10')
 assert.equal(selectLatestNpmVersion({ latest: '0.2.2-rc.1' }), '0.2.2-rc.1')
 assert.equal(selectLatestNpmVersion({ latest: 'not-a-version' }), null)
 assert.equal(selectLatestNpmVersion({}), null)
@@ -256,7 +262,7 @@ try {
     true,
   )
 
-  // npm dist-tags: `next` may be newer than `latest`.
+  // npm dist-tags: `next` may be newer than `latest`, and `alpha` newer still.
   await withServer(
     (request, response) => {
       if (!request.url?.includes('@deepseek-ai')) {
@@ -266,14 +272,16 @@ try {
       }
       response.writeHead(200, { 'Content-Type': 'application/json' })
       response.end(
-        JSON.stringify({ 'dist-tags': { latest: '0.2.2-rc.1', next: '0.2.2-rc.5' } }),
+        JSON.stringify({
+          'dist-tags': { latest: '0.2.2-rc.1', next: '0.2.2-rc.5', alpha: '0.2.3-alpha.2' },
+        }),
       )
     },
     async (base) => {
       const tags = await fetchNpmDistTags({ registry: base })
       assert.equal(tags.tags.next, '0.2.2-rc.5')
       const latest = await fetchLatestNpmVersion({ registries: [base] })
-      assert.equal(latest.version, '0.2.2-rc.5')
+      assert.equal(latest.version, '0.2.3-alpha.2')
       assert.equal(latest.registry, base)
     },
   )

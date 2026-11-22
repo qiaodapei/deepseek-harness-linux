@@ -221,9 +221,10 @@ export const DEFAULT_NPM_REGISTRIES = [
 export function selectLatestNpmVersion(distTags) {
   const tags = distTags && typeof distTags === 'object' ? distTags : {}
   let latest = null
-  // `latest` can be a stable release while `next` is a newer prerelease, or
-  // the other way around. Consider both and take the highest semver.
-  for (const name of ['latest', 'next']) {
+  // `latest` can be a stable release while `next`/`beta`/`alpha` are newer
+  // prereleases, or the other way around. Consider every channel and take the
+  // highest semver; an older alpha never shadows a newer stable.
+  for (const name of ['latest', 'next', 'beta', 'alpha']) {
     const version = parseVersion(tags[name])
     if (!version) continue
     if (!latest || compareVersions(version, latest) > 0) latest = version

@@ -156,7 +156,7 @@ desktop/install-appimage.sh ~/Applications/DeepSeek-Harness-0.2.2-rc.5-x86_64.Ap
 `DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage`，不再单独维护客户端版本号。
 
 AppImage 启动约 15 秒后同时检查 GitHub Releases 的 `dsh-v*` 标签和 npm 的
-`latest` / `next` dist-tag，取两者中的最高版本；之后每小时检查一次，系统从睡眠恢复时也会补查。
+`latest` / `next` / `beta` / `alpha` dist-tag，取其中的最高版本；之后每小时检查一次，系统从睡眠恢复时也会补查。
 发现新版本后默认执行**内部更新**：
 
 1. 托盘菜单显示 **安装更新 `<version>`**，并发送系统通知；
@@ -187,6 +187,8 @@ AppImage 启动约 15 秒后同时检查 GitHub Releases 的 `dsh-v*` 标签和 
 - runtime 目录：`~/.local/share/deepseek-harness/runtime/`；更新状态保存在
   `~/.local/state/deepseek-harness/update-state.json`。
 - 更新器逻辑有独立测试：`npm run test:updater`。
+- 版本检测覆盖 npm 的 `latest` / `next` / `beta` / `alpha` 通道（取最高版本）；官方只发布在
+  alpha 通道的预发布版本（如 `0.2.3-alpha.2`）也会被提示，不会被 `latest` 的旧版本遮住。
 - 因为客户端壳版本跟随发布时的 dsh，内部更新只升级 dsh，不会改变壳版本；壳层修复仍通过完整
   AppImage 发布。覆盖同一版本的 Release 后，已安装同版本的用户不会收到自动更新提示。
 - 从旧的 `1.0.0` / `1.1.0` 客户端迁移时，需要手动安装一次 `0.2.2-rc.5`：旧版本号高于

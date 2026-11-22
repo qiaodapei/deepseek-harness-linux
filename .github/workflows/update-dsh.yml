@@ -151,7 +151,9 @@ jobs:
           npm install-scripts ls --json > "$RUNNER_TEMP/install-scripts.json"
           node -e '
             const data = require(process.env.RUNNER_TEMP + "/install-scripts.json")
-            const pending = data.allowScripts || []
+            const pending = (data.allowScripts || []).map((item) =>
+              typeof item === "string" ? item : `${item.name ?? "?"}@${item.version ?? "?"}`,
+            )
             if (pending.length > 0) {
               console.error("Unreviewed install scripts:")
               for (const item of pending) console.error("  " + item)

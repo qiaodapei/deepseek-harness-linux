@@ -40,6 +40,7 @@
     "koffi@3.1.1": true,
     "protobufjs@7.6.6": true,
     "@google/genai@2.21.0": true,
+    "@google/genai@2.32.0": true,
     "pnpm@12.21.0": true,
     "electron-winstaller@5.4.0": true
   }

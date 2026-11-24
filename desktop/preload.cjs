@@ -396,16 +396,31 @@ function installUpdateDialog() {
     }
     if (phase === 'available' && state?.latest) {
       const latest = state.latest
+      const runtimeAvailable = Boolean(state.runtimeAvailable)
+      const shellAvailable = Boolean(state.shellAvailable)
       const notes = latest.notes
         ? `<pre class="notes">${esc(String(latest.notes).slice(0, 1200))}</pre>`
         : ''
+      if (!runtimeAvailable && shellAvailable) {
+        return {
+          title: `桌面客户端 ${esc(latest.version)} 可用`,
+          body: `<p class="muted">当前桌面客户端 v${esc(state.currentShell)} → v${esc(latest.version)}</p>
+            <p class="muted">窗口内更新只更新 dsh runtime，不会替换桌面客户端。请从托盘菜单选择「下载完整安装包」。</p>${notes}`,
+          buttons: [{ label: '知道了', action: 'close', primary: true }],
+        }
+      }
+      const shellNote = shellAvailable
+        ? `<p class="muted">桌面客户端也可更新到 v${esc(latest.version)}；完整安装包请从托盘菜单下载。</p>`
+        : ''
       return {
         title: `发现新版本 ${esc(latest.version)}`,
-        body: `<p class="muted">当前版本 v${esc(state.current)} → 新版本 v${esc(latest.version)}</p>${notes}`,
-        buttons: [
-          { label: '稍后', action: 'close' },
-          { label: '立即更新', action: 'install', primary: true },
-        ],
+        body: `<p class="muted">当前 dsh v${esc(state.currentRuntime ?? state.current)} → 新版本 v${esc(latest.version)}</p>${shellNote}${notes}`,
+        buttons: runtimeAvailable
+          ? [
+              { label: '稍后', action: 'close' },
+              { label: '立即更新', action: 'install', primary: true },
+            ]
+          : [{ label: '关闭', action: 'close', primary: true }],
       }
     }
     return {

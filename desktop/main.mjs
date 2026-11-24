@@ -42,6 +42,7 @@ import {
   formatBytes,
   installAppImage,
   isDirectoryWritable,
+  isStableChannelVersion,
   parseSha256,
   readInstalledDshVersion,
   readUpdateState,
@@ -143,6 +144,8 @@ let updateStatus = {
   error: null,
   progress: 0,
   total: 0,
+  runtimeAvailable: false,
+  shellAvailable: false,
 }
 let updateTimer = null
 let checkPromise = null
@@ -173,6 +176,22 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function currentAppVersion() {
   return process.env.DSH_UPDATE_CURRENT_VERSION || getInstalledDshVersion() || app.getVersion()
+}
+
+function currentShellVersion() {
+  return app.getVersion()
+}
+
+function updateTargets(version) {
+  let runtimeAvailable = false
+  let shellAvailable = false
+  try {
+    runtimeAvailable = compareVersions(version, currentAppVersion()) > 0
+  } catch {}
+  try {
+    shellAvailable = compareVersions(version, currentShellVersion()) > 0
+  } catch {}
+  return { runtimeAvailable, shellAvailable }
 }
 
 function getInstalledDshVersion() {
@@ -238,13 +257,17 @@ function setUpdateStatus(patch) {
 // Serializable update-state view for the in-window update dialog (notes are
 // flattened to plain text; the raw markdown never reaches the page).
 function updateStatusSnapshot() {
-  const { phase, latest, error, progress, total } = updateStatus
+  const { phase, latest, error, progress, total, runtimeAvailable, shellAvailable } = updateStatus
   return {
     phase,
     error: error ?? null,
     progress,
     total,
     current: currentAppVersion(),
+    currentRuntime: currentAppVersion(),
+    currentShell: currentShellVersion(),
+    runtimeAvailable: Boolean(runtimeAvailable),
+    shellAvailable: Boolean(shellAvailable),
     latest: latest
       ? { ...latest, notes: plainNotes(latest.notes) }
       : null,
@@ -322,7 +345,7 @@ function notify(title, body, onClick) {
 }
 
 function updateEntryLabel() {
-  const { phase, latest, progress, total } = updateStatus
+  const { phase, latest, progress, total, runtimeAvailable } = updateStatus
   if (phase === 'checking') return '正在检查更新…'
   if (phase === 'downloading') {
     if (total > 0) {
@@ -331,7 +354,9 @@ function updateEntryLabel() {
     return '正在下载 dsh 更新…'
   }
   if (phase === 'installing') return '正在安装 dsh 更新…'
-  if (phase === 'available' && latest) return `安装更新 v${latest.version}…`
+  if (phase === 'available' && latest) {
+    return runtimeAvailable ? `安装更新 v${latest.version}…` : `桌面客户端更新 v${latest.version}…`
+  }
   if (phase === 'error') return '重新检查更新…'
   return '检查更新…'
 }
@@ -359,7 +384,9 @@ function updateMenuTemplate({ fullPackage = false } = {}) {
     updateStatus.latest?.shaAsset
   ) {
     items.push({
-      label: '下载完整安装包（可选）…',
+      label: updateStatus.shellAvailable
+        ? `下载完整安装包 v${updateStatus.latest.version}…`
+        : '下载完整安装包（可选）…',
       click: () => downloadAndInstallFullUpdate(),
     })
   }
@@ -420,6 +447,16 @@ function refreshMenus() {
 }
 
 async function fetchLatestUpdateInfo({ manual = false, force = false, token = '' } = {}) {
+  // Older builds could cache an alpha/beta preview. Drop it so the stable
+  // channel check does not reuse a preview release hidden behind an ETag.
+  if (updateState.latestRelease && !isStableChannelVersion(updateState.latestRelease.version)) {
+    updateState.latestRelease = null
+    updateState.etag = ''
+  }
+  if (updateState.latest && !isStableChannelVersion(updateState.latest.version)) {
+    updateState.latest = null
+  }
+
   let release = null
   let githubError = null
   try {
@@ -440,6 +477,8 @@ async function fetchLatestUpdateInfo({ manual = false, force = false, token = ''
     release = updateState.latestRelease || null
     log('release check failed:', error.message)
   }
+
+  if (release && !isStableChannelVersion(release.version)) release = null
 
   let npm = null
   let npmError = null
@@ -510,48 +549,75 @@ async function checkForUpdates({ manual = false, force = false } = {}) {
   checkPromise = (async () => {
     const token = readUpdateToken()
     const current = currentAppVersion()
+    const shellCurrent = currentShellVersion()
     try {
       const { latest: newest } = await fetchLatestUpdateInfo({ manual, force, token })
+      const targets = updateTargets(newest.version)
 
       updateState.lastCheck = Date.now()
       updateState.latest =
-        compareVersions(newest.version, current) > 0 ? cacheRelease(newest) : null
+        isStableChannelVersion(newest.version) &&
+        (targets.runtimeAvailable || targets.shellAvailable)
+          ? cacheRelease(newest)
+          : null
       await persistUpdateState()
 
       log(
         'update check:',
         `current=v${current}`,
+        `shell=v${shellCurrent}`,
         updateState.latest ? `available=v${newest.version}` : 'up-to-date',
       )
 
       if (updateState.latest) {
         const latest = updateState.latest
-        setUpdateStatus({ phase: 'available', latest, error: null })
+        setUpdateStatus({
+          phase: 'available',
+          latest,
+          error: null,
+          runtimeAvailable: targets.runtimeAvailable,
+          shellAvailable: targets.shellAvailable,
+        })
         if (manual) {
           showUpdateOverlay()
         } else if (updateState.notifiedVersion !== latest.version) {
           updateState.notifiedVersion = latest.version
           await persistUpdateState()
-          notify(
-            '发现 DeepSeek Harness 更新',
-            `v${latest.version} 可用，当前为 v${current}。点击查看并安装。`,
-            () => showUpdateOverlay(),
-          )
+          const message = targets.runtimeAvailable
+            ? `v${latest.version} 可用，当前 dsh 为 v${current}。点击查看并安装。`
+            : `桌面客户端 v${latest.version} 可用，当前为 v${shellCurrent}。请从托盘菜单下载完整安装包。`
+          notify('发现 DeepSeek Harness 更新', message, () => showUpdateOverlay())
         }
         return latest
       }
 
-      setUpdateStatus({ phase: 'idle', latest: null, error: null })
+      setUpdateStatus({
+        phase: 'idle',
+        latest: null,
+        error: null,
+        runtimeAvailable: false,
+        shellAvailable: false,
+      })
       return null
     } catch (error) {
       log('update check failed:', error.message)
       let cached = null
+      let cachedTargets = { runtimeAvailable: false, shellAvailable: false }
       try {
-        if (updateState.latest && compareVersions(updateState.latest.version, current) > 0) {
-          cached = updateState.latest
+        if (updateState.latest && isStableChannelVersion(updateState.latest.version)) {
+          const targets = updateTargets(updateState.latest.version)
+          if (targets.runtimeAvailable || targets.shellAvailable) {
+            cached = updateState.latest
+            cachedTargets = targets
+          }
         }
       } catch {}
-      setUpdateStatus({ phase: 'error', latest: cached, error: error.message })
+      setUpdateStatus({
+        phase: 'error',
+        latest: cached,
+        error: error.message,
+        ...cachedTargets,
+      })
       return null
     }
   })()
@@ -561,6 +627,27 @@ async function checkForUpdates({ manual = false, force = false } = {}) {
   } finally {
     checkPromise = null
   }
+}
+
+async function showDownloadedDialog(release, path) {
+  showWindow()
+  const mode = app.isPackaged ? '当前 AppImage 所在目录不可写' : '当前是开发模式（npm run desktop）'
+  const { response } = await showMessageBox({
+    type: 'info',
+    title: '更新已下载',
+    message: `DeepSeek Harness ${release.version} 已下载`,
+    detail: [
+      `文件：${path}`,
+      `${mode}，无法自动替换正在运行的客户端。`,
+      '退出客户端后，用这个文件替换原来的 AppImage 即可。',
+    ].join('\n'),
+    buttons: ['打开所在文件夹', '查看发布说明', '关闭'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  })
+  if (response === 0) shell.showItemInFolder(path)
+  else if (response === 1) shell.openExternal(release.url)
 }
 
 async function showDownloadErrorDialog(error, path) {
@@ -648,13 +735,51 @@ async function installRuntimeUpdate(version, signal) {
 async function downloadAndInstallUpdate() {
   const latest = updateStatus.latest
   if (!latest || downloadController) return
+  if (!isStableChannelVersion(latest.version)) {
+    setUpdateStatus({ phase: 'idle', latest: null, progress: 0, total: 0 })
+    await showMessageBox({
+      type: 'error',
+      title: '无法安装预览版本',
+      message: '当前客户端只跟踪官方稳定通道，不会安装 alpha/beta 版本。',
+      buttons: ['确定'],
+    })
+    return
+  }
 
   if (compareVersions(latest.version, currentAppVersion()) <= 0) {
-    setUpdateStatus({ phase: 'idle', latest: null, progress: 0, total: 0 })
+    const targets = updateTargets(latest.version)
+    if (targets.shellAvailable) {
+      setUpdateStatus({
+        phase: 'available',
+        latest,
+        progress: 0,
+        total: 0,
+        error: null,
+        ...targets,
+      })
+      await showMessageBox({
+        type: 'info',
+        title: '需要更新桌面客户端',
+        message: `桌面客户端 v${latest.version} 可用。`,
+        detail:
+          '窗口内更新只更新 dsh runtime，不会替换桌面客户端。请从托盘菜单选择「下载完整安装包」更新客户端。',
+        buttons: ['确定'],
+      })
+      return
+    }
+    setUpdateStatus({
+      phase: 'idle',
+      latest: null,
+      progress: 0,
+      total: 0,
+      error: null,
+      runtimeAvailable: false,
+      shellAvailable: false,
+    })
     await showMessageBox({
       type: 'info',
       title: '无需更新',
-      message: '当前已是最新版本。',
+      message: '当前 dsh 和桌面客户端都已是最新版本。',
       buttons: ['确定'],
     })
     return
@@ -721,7 +846,15 @@ async function downloadAndInstallUpdate() {
       )
     }
 
-    setUpdateStatus({ phase: 'idle', latest: null, progress: 0, total: 0, error: null })
+    setUpdateStatus({
+      phase: 'idle',
+      latest: null,
+      progress: 0,
+      total: 0,
+      error: null,
+      runtimeAvailable: false,
+      shellAvailable: false,
+    })
     notify('dsh 已更新', `已更新到 ${latest.version}，dsh 服务已重启。`)
     pruneRuntimeVersions(dataDir, [latest.version, previousVersion].filter(Boolean)).catch((error) =>
       log('failed to prune old runtime versions:', error.message),
@@ -746,13 +879,51 @@ async function downloadAndInstallUpdate() {
 async function downloadAndInstallFullUpdate() {
   const latest = updateStatus.latest
   if (!latest || downloadController) return
-
-  if (compareVersions(latest.version, currentAppVersion()) <= 0) {
+  if (!isStableChannelVersion(latest.version)) {
     setUpdateStatus({ phase: 'idle', latest: null, progress: 0, total: 0 })
+    await showMessageBox({
+      type: 'error',
+      title: '无法安装预览版本',
+      message: '当前客户端只跟踪官方稳定通道，不会下载 alpha/beta 完整安装包。',
+      buttons: ['确定'],
+    })
+    return
+  }
+
+  if (compareVersions(latest.version, currentShellVersion()) <= 0) {
+    const targets = updateTargets(latest.version)
+    if (targets.runtimeAvailable) {
+      setUpdateStatus({
+        phase: 'available',
+        latest,
+        progress: 0,
+        total: 0,
+        error: null,
+        ...targets,
+      })
+      await showMessageBox({
+        type: 'info',
+        title: 'dsh 可在窗口内更新',
+        message: `dsh v${latest.version} 可用。`,
+        detail:
+          '窗口内更新只更新 dsh runtime。请使用标题栏「应用 → 检查更新」或托盘菜单的「安装更新」。',
+        buttons: ['确定'],
+      })
+      return
+    }
+    setUpdateStatus({
+      phase: 'idle',
+      latest: null,
+      progress: 0,
+      total: 0,
+      error: null,
+      runtimeAvailable: false,
+      shellAvailable: false,
+    })
     await showMessageBox({
       type: 'info',
       title: '无需更新',
-      message: '当前已是最新版本。',
+      message: '当前桌面客户端和 dsh 都已是最新版本。',
       buttons: ['确定'],
     })
     return
@@ -936,8 +1107,16 @@ function hydrateCachedUpdate() {
   const cached = updateState.latest
   if (!cached || !cached.version) return
   try {
-    if (compareVersions(cached.version, currentAppVersion()) > 0) {
-      updateStatus = { ...updateStatus, phase: 'available', latest: cached }
+    if (!isStableChannelVersion(cached.version)) return
+    const targets = updateTargets(cached.version)
+    if (targets.runtimeAvailable || targets.shellAvailable) {
+      updateStatus = {
+        ...updateStatus,
+        phase: 'available',
+        latest: cached,
+        runtimeAvailable: targets.runtimeAvailable,
+        shellAvailable: targets.shellAvailable,
+      }
     }
   } catch {}
 }
@@ -1350,7 +1529,7 @@ function applicationMenuItems() {
   return [
     { label: '关于 DeepSeek Harness', click: () => showAbout() },
     { type: 'separator' },
-    { label: '检查更新...', click: () => { void checkForUpdates({ manual: true, force: true }) } },
+    { label: '检查更新', click: () => { void checkForUpdates({ manual: true, force: true }) } },
     { label: '管理 dsh 命令...', click: () => { void showCommandManager() } },
     { type: 'separator' },
     {

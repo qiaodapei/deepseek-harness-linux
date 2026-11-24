@@ -199,7 +199,17 @@ export function normalizeRelease(raw, { repo = DEFAULT_REPO } = {}) {
   }
 }
 
-export function selectLatestRelease(releases, currentVersion) {
+export function isStableChannelVersion(input) {
+  const version = typeof input === 'string' ? parseVersion(input) : input
+  if (!version) return false
+  // The official stable channel publishes final versions and release
+  // candidates (`-rc.N`). Alpha/beta/dev builds are preview channels and must
+  // never be picked up automatically, even when they sort above current.
+  if (version.prerelease.length === 0) return true
+  return /^rc(?:[.-]|$)/i.test(version.prerelease[0])
+}
+
+export function selectLatestRelease(releases, currentVersion, { stableOnly = true } = {}) {
   const current = parseVersion(currentVersion)
   if (!current) return null
 
@@ -207,6 +217,7 @@ export function selectLatestRelease(releases, currentVersion) {
   for (const raw of Array.isArray(releases) ? releases : []) {
     const release = normalizeRelease(raw)
     if (!release) continue
+    if (stableOnly && !isStableChannelVersion(release.version)) continue
     if (compareVersions(release.version, current) <= 0) continue
     if (!latest || compareVersions(release.version, latest.version) > 0) latest = release
   }
@@ -220,16 +231,12 @@ export const DEFAULT_NPM_REGISTRIES = [
 
 export function selectLatestNpmVersion(distTags) {
   const tags = distTags && typeof distTags === 'object' ? distTags : {}
-  let latest = null
-  // `latest` can be a stable release while `next`/`beta`/`alpha` are newer
-  // prereleases, or the other way around. Consider every channel and take the
-  // highest semver; an older alpha never shadows a newer stable.
-  for (const name of ['latest', 'next', 'beta', 'alpha']) {
-    const version = parseVersion(tags[name])
-    if (!version) continue
-    if (!latest || compareVersions(version, latest) > 0) latest = version
-  }
-  return latest ? latest.raw : null
+  // The official stable channel is npm's `latest` dist-tag. Never fall back to
+  // `next`/`beta`/`alpha`: those are preview channels and can point at a newer
+  // minor alpha that is less stable than the current release candidate.
+  const version = parseVersion(tags.latest)
+  if (!version || !isStableChannelVersion(version)) return null
+  return version.raw
 }
 
 export async function fetchNpmDistTags({ registry, timeoutMs = 20_000, signal } = {}) {
@@ -287,7 +294,7 @@ export async function fetchLatestNpmVersion({
       const { registry: resolved, tags } = await fetchNpmDistTags({ registry, timeoutMs, signal })
       const version = selectLatestNpmVersion(tags)
       if (version) return { version, registry: resolved, tags }
-      errors.push(`${resolved}: 没有可用的 dist-tag`)
+      errors.push(`${resolved}: npm latest 通道没有稳定的 dsh 版本`)
     } catch (error) {
       if (signal?.aborted) throw error
       errors.push(error.message)

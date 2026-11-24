@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness",
-  "version": "0.2.3-alpha.2",
+  "version": "0.2.2-rc.5",
   "private": true,
   "description": "DeepSeek Harness (dsh) local workspace: pinned CLI, version updates, and profile plugin management",
   "license": "MIT",
@@ -23,19 +23,20 @@
     "desktop:shortcut": "bash desktop/install-shortcut.sh",
     "appimage": "bash desktop/build-appimage.sh",
     "test:updater": "node scripts/test-updater.mjs",
-    "update": "npm install --save-dev --save-exact @deepseek-ai/dsh@next",
+    "update": "npm install --save-dev --save-exact @deepseek-ai/dsh@latest",
     "update:latest": "npm install --save-dev --save-exact @deepseek-ai/dsh@latest",
+    "update:next": "npm install --save-dev --save-exact @deepseek-ai/dsh@next",
     "update:check": "npm view @deepseek-ai/dsh dist-tags --json",
     "link": "npm link"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh": "0.2.2-rc.5",
     "electron": "45.3.2",
     "electron-builder": "26.18.0",
     "pnpm": "12.21.0"
   },
   "allowScripts": {
-    "@deepseek-ai/dsh-subprocess-local@0.2.3-alpha.2": true,
+    "@deepseek-ai/dsh-subprocess-local@0.2.2-rc.5": true,
     "node-pty@1.2.0-beta.15": true,
     "koffi@3.1.1": true,
     "protobufjs@7.6.6": true,

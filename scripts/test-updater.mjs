@@ -14,6 +14,7 @@ import {
   fetchNpmDistTags,
   formatBytes,
   installAppImage,
+  isStableChannelVersion,
   normalizeRelease,
   parseSha256,
   parseVersion,
@@ -110,20 +111,42 @@ assert.equal(selectLatestRelease(releases, '0.2.2-rc.3').version, '0.2.3')
 assert.equal(selectLatestRelease(releases, '0.2.3'), null)
 assert.equal(selectLatestRelease(releases, '0.2.4'), null)
 
+// Alpha/beta releases are preview-only and must not be selected for the
+// stable channel, even though semver sorts them above the current rc.
+const previewReleases = [
+  release('dsh-v0.2.2-rc.5', 'DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage'),
+  release('dsh-v0.2.3-alpha.2', 'DeepSeek-Harness-0.2.3-alpha.2-x86_64.AppImage'),
+]
+assert.equal(selectLatestRelease(previewReleases, '0.2.2-rc.4').version, '0.2.2-rc.5')
+assert.equal(
+  selectLatestRelease(previewReleases, '0.2.2-rc.4', { stableOnly: false }).version,
+  '0.2.3-alpha.2',
+)
+
 assert.equal(parseSha256(`${sha}  file.AppImage\n`), sha)
 assert.equal(parseSha256('not a hash'), null)
 assert.equal(formatBytes(0), '0 B')
 assert.equal(formatBytes(355 * 1024 * 1024), '355 MB')
 
-assert.equal(selectLatestNpmVersion({ latest: '0.2.2-rc.1', next: '0.2.2-rc.5' }), '0.2.2-rc.5')
-assert.equal(selectLatestNpmVersion({ latest: '0.2.3', next: '0.2.3-rc.5' }), '0.2.3')
+assert.equal(isStableChannelVersion('0.2.2-rc.5'), true)
+assert.equal(isStableChannelVersion('0.2.3'), true)
+assert.equal(isStableChannelVersion('0.2.3-alpha.2'), false)
+assert.equal(isStableChannelVersion('0.2.3-beta.1'), false)
+assert.equal(isStableChannelVersion('0.2.3-dev.1'), false)
+assert.equal(isStableChannelVersion('not-a-version'), false)
+
+// The stable channel is npm's `latest` tag only. Never promote a newer
+// `next`/`beta`/`alpha` preview automatically.
+assert.equal(selectLatestNpmVersion({ latest: '0.2.2-rc.1', next: '0.2.2-rc.5' }), '0.2.2-rc.1')
+assert.equal(selectLatestNpmVersion({ latest: '0.2.2-rc.5', next: '0.2.2-rc.5' }), '0.2.2-rc.5')
 assert.equal(
   selectLatestNpmVersion({ latest: '0.2.2-rc.5', next: '0.2.2-rc.5', alpha: '0.2.3-alpha.2' }),
-  '0.2.3-alpha.2',
+  '0.2.2-rc.5',
 )
-assert.equal(selectLatestNpmVersion({ latest: '0.2.3-alpha.2', alpha: '0.2.2-rc.5' }), '0.2.3-alpha.2')
-assert.equal(selectLatestNpmVersion({ alpha: '0.2.1-alpha.10', latest: '0.2.1-alpha.2' }), '0.2.1-alpha.10')
-assert.equal(selectLatestNpmVersion({ latest: '0.2.2-rc.1' }), '0.2.2-rc.1')
+assert.equal(selectLatestNpmVersion({ latest: '0.2.3' }), '0.2.3')
+assert.equal(selectLatestNpmVersion({ latest: '0.2.3-alpha.2' }), null)
+assert.equal(selectLatestNpmVersion({ latest: '0.2.3-beta.1' }), null)
+assert.equal(selectLatestNpmVersion({ next: '0.2.2-rc.5' }), null)
 assert.equal(selectLatestNpmVersion({ latest: 'not-a-version' }), null)
 assert.equal(selectLatestNpmVersion({}), null)
 
@@ -262,7 +285,7 @@ try {
     true,
   )
 
-  // npm dist-tags: `next` may be newer than `latest`, and `alpha` newer still.
+  // npm dist-tags: only `latest` is the stable channel; alpha is ignored.
   await withServer(
     (request, response) => {
       if (!request.url?.includes('@deepseek-ai')) {
@@ -273,7 +296,7 @@ try {
       response.writeHead(200, { 'Content-Type': 'application/json' })
       response.end(
         JSON.stringify({
-          'dist-tags': { latest: '0.2.2-rc.1', next: '0.2.2-rc.5', alpha: '0.2.3-alpha.2' },
+          'dist-tags': { latest: '0.2.2-rc.5', next: '0.2.2-rc.5', alpha: '0.2.3-alpha.2' },
         }),
       )
     },
@@ -281,7 +304,7 @@ try {
       const tags = await fetchNpmDistTags({ registry: base })
       assert.equal(tags.tags.next, '0.2.2-rc.5')
       const latest = await fetchLatestNpmVersion({ registries: [base] })
-      assert.equal(latest.version, '0.2.3-alpha.2')
+      assert.equal(latest.version, '0.2.2-rc.5')
       assert.equal(latest.registry, base)
     },
   )

@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'dsh version (empty = latest official deepseek-harness release)'
+        description: 'dsh version (empty = npm latest / official stable channel)'
         required: false
         default: ''
       force:
@@ -47,7 +47,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
           df -h /
 
-      - name: Detect latest official dsh release
+      - name: Detect latest official stable dsh release
         id: detect
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,20 +65,25 @@ jobs:
             version="${version#v}"
             echo "Using requested version: $version"
           else
-            latest_tag="$(
-              gh api --paginate 'repos/deepseek-ai/deepseek-harness/releases?per_page=100' \
-                --jq '.[] | select(.draft == false and (.tag_name | startswith("dsh-v"))) | "\(.published_at)\t\(.tag_name)"' \
-                | sort -r | awk -F '\t' 'NR == 1 { print $2 }'
-            )"
-            if [[ -z "$latest_tag" ]]; then
-              echo "::error::No dsh-v* release found in deepseek-ai/deepseek-harness"
+            # The official stable channel is npm's `latest` dist-tag. Do not
+            # scan GitHub releases: an alpha/beta pre-release can be the most
+            # recently published tag while `latest` still points at the stable
+            # release candidate used by the official Windows/macOS builds.
+            version="$(npm view '@deepseek-ai/dsh@latest' version --silent)"
+            if [[ -z "$version" ]]; then
+              echo "::error::npm latest did not return a dsh version"
               exit 1
             fi
-            version="${latest_tag#dsh-v}"
+            echo "Using npm latest stable version: $version"
           fi
 
           if [[ ! "$version" =~ ^[0-9A-Za-z.+-]+$ ]]; then
             echo "::error::Invalid dsh version: $version"
+            exit 1
+          fi
+
+          if ! node --input-type=module -e "import { isStableChannelVersion } from './desktop/updater.mjs'; process.exit(isStableChannelVersion(process.argv[1]) ? 0 : 1)" "$version"; then
+            echo "::error::Refusing non-stable version $version; the stable workflow only accepts final versions and -rc.N release candidates"
             exit 1
           fi
 

@@ -3,7 +3,7 @@
 当前目录是一个自包含的 dsh 安装：CLI 和 pnpm 都在本项目的 `node_modules/` 里，版本由
 `package.json` 锁定，升级与插件管理都有现成命令。
 
-- 已安装：`@deepseek-ai/dsh` **0.2.3-alpha.2**（npm `next`，对应 GitHub 最新 release）
+- 已安装：`@deepseek-ai/dsh` **0.2.2-rc.5**（npm `latest`，对应官方稳定通道）
 - 桌面客户端：Electron 壳 + 内置 dsh，AppImage 支持自动更新
 - Node 要求：`>= 24.9.0`（当前 `v24.22.2`）
 - 用户数据：默认 `~/.dsh`（profiles、sessions、凭证），可用 `DSH_HOME` 覆盖
@@ -26,7 +26,7 @@
 ## 快速开始
 
 ```bash
-./bin/dsh --version          # 0.2.3-alpha.2
+./bin/dsh --version          # 0.2.2-rc.5
 ./bin/dsh --help
 
 ./bin/dsh web                # Web UI（首次使用自动初始化 web profile）
@@ -60,7 +60,7 @@ npm run desktop:shortcut     # 安装应用菜单入口（只需执行一次）
 
 - 启动时自动拉起 `dsh web`（绑定 `127.0.0.1` 的随机端口，带 token），加载完成后显示主窗口。
 - **关闭窗口 = 最小化到托盘**，服务继续在后台运行；首次隐藏会发一条通知。
-- 托盘菜单：打开主窗口 / 在浏览器中打开 / 检查更新 / 自动检查更新（开关）/ 重启服务 / 关于 / 退出。
+- 托盘菜单：打开主窗口 / 在浏览器中打开 / 检查更新 / 下载完整安装包（有可用版本时）/ 自动检查更新（开关）/ 重启服务 / 关于 / 退出。
 - 再次从应用菜单启动会唤醒已运行窗口（单实例），不会重复起服务。
 - 只有托盘里的 **退出**（或 `Ctrl+Q`）才会停止 dsh 服务。
 
@@ -102,14 +102,14 @@ npm run appimage
 产物：
 
 ```text
-dist-desktop/DeepSeek-Harness-0.2.3-alpha.2-x86_64.AppImage   # 约 360 MB
+dist-desktop/DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage   # 约 360 MB
 ```
 
 直接运行（或 chmod 后在文件管理器双击）：
 
 ```bash
-chmod +x dist-desktop/DeepSeek-Harness-0.2.3-alpha.2-x86_64.AppImage
-./dist-desktop/DeepSeek-Harness-0.2.3-alpha.2-x86_64.AppImage
+chmod +x dist-desktop/DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage
+./dist-desktop/DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage
 ```
 
 ### 安装到应用菜单（可选）
@@ -117,7 +117,7 @@ chmod +x dist-desktop/DeepSeek-Harness-0.2.3-alpha.2-x86_64.AppImage
 如果希望从应用菜单启动，而不是每次手动运行 AppImage：
 
 ```bash
-desktop/install-appimage.sh ~/Applications/DeepSeek-Harness-0.2.3-alpha.2-x86_64.AppImage
+desktop/install-appimage.sh ~/Applications/DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage
 ```
 
 脚本会安装多尺寸图标到 `~/.local/share/icons/hicolor`，并生成
@@ -140,23 +140,22 @@ desktop/install-appimage.sh ~/Applications/DeepSeek-Harness-0.2.3-alpha.2-x86_64
 - 用户数据仍在 `~/.dsh`；日志仍在 `~/.local/state/deepseek-harness/`。删除 AppImage 不会删除会话和登录态。
 - Ubuntu 24.10 / 26.04 运行 AppImage 需要 FUSE2：`sudo apt install libfuse2t64`。没有 FUSE 时用：
   ```bash
-  ./DeepSeek-Harness-0.2.3-alpha.2-x86_64.AppImage --appimage-extract-and-run
+  ./DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage --appimage-extract-and-run
   ```
 - AppImage 自带 Node、dsh、pnpm，但不自带 glibc。本地构建使用当前系统（Ubuntu 26.04，glibc 2.43）；
   GitHub Actions 使用 Ubuntu 24.04（glibc 2.39）。目标系统的 glibc 不能低于构建机。
 - 本机 AppArmor 限制下 AppImage 会自动使用 `--no-sandbox`（AppRun 检测 + desktop 入口参数）。
-- AppImage 内置自动更新：启动后会自动检查 GitHub Release 和 npm 版本，也可从托盘或帮助菜单手动检查。
-  默认优先内部更新 dsh，只有壳层更新或内部更新失败时才下载完整 AppImage；两种方式都使用同一份 `~/.dsh` 用户数据。
+- AppImage 内置自动更新：启动后会自动检查 GitHub Release 和 npm 版本，也可从托盘或标题栏「应用 → 检查更新」手动检查。
+  窗口内更新只更新 dsh runtime；桌面壳需要更新时，从托盘菜单下载完整安装包。两种方式都使用同一份 `~/.dsh` 用户数据。
 - 重新打包前建议先退出正在运行的桌面客户端，否则新 AppImage 可能只是唤醒旧实例。
 
 ## 客户端自动更新
 
 客户端版本直接采用 dsh 版本，Release 标签也使用官方命名 `dsh-v<version>`。例如官方
-`dsh-v0.2.3-alpha.2` 对应应用版本 `0.2.3-alpha.2` 和
-`DeepSeek-Harness-0.2.3-alpha.2-x86_64.AppImage`，不再单独维护客户端版本号。
+`dsh-v0.2.2-rc.5` 对应应用版本 `0.2.2-rc.5` 和
+`DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage`，不再单独维护客户端版本号。
 
-AppImage 启动约 15 秒后同时检查 GitHub Releases 的 `dsh-v*` 标签和 npm 的
-`latest` / `next` / `beta` / `alpha` dist-tag，取其中的最高版本；之后每小时检查一次，系统从睡眠恢复时也会补查。
+AppImage 启动约 15 秒后检查 GitHub Releases 的 `dsh-v*` 标签和 npm 的 `latest` dist-tag，只采用官方稳定通道；`alpha` / `beta` 预览版不会被自动安装。之后每小时检查一次，系统从睡眠恢复时也会补查。
 发现新版本后默认执行**内部更新**：
 
 1. 托盘菜单显示 **安装更新 `<version>`**，并发送系统通知；
@@ -187,12 +186,12 @@ AppImage 启动约 15 秒后同时检查 GitHub Releases 的 `dsh-v*` 标签和 
 - runtime 目录：`~/.local/share/deepseek-harness/runtime/`；更新状态保存在
   `~/.local/state/deepseek-harness/update-state.json`。
 - 更新器逻辑有独立测试：`npm run test:updater`。
-- 版本检测覆盖 npm 的 `latest` / `next` / `beta` / `alpha` 通道（取最高版本）；官方只发布在
-  alpha 通道的预发布版本（如 `0.2.3-alpha.2`）也会被提示，不会被 `latest` 的旧版本遮住。
+- 版本检测只使用 npm 的 `latest` 稳定通道（允许 `-rc.N` 和正式版，排除 `alpha` / `beta`）；
+  `next` / `beta` / `alpha` 不会被自动采用。
 - 因为客户端壳版本跟随发布时的 dsh，内部更新只升级 dsh，不会改变壳版本；壳层修复仍通过完整
   AppImage 发布。覆盖同一版本的 Release 后，已安装同版本的用户不会收到自动更新提示。
-- 从旧的 `1.0.0` / `1.1.0` 客户端迁移时，需要手动安装一次 `0.2.3-alpha.2`：旧版本号高于
-  `0.2.3-alpha.2`，更新器不会自动降级。
+- 从旧的 `1.0.0` / `1.1.0` 客户端迁移时，需要手动安装一次 `0.2.2-rc.5`：旧版本号高于
+  `0.2.2-rc.5`，更新器不会自动降级。
 
 ### 更新源与 token
 
@@ -221,14 +220,13 @@ DSH_NPM_REGISTRY=https://registry.npmjs.org  # 覆盖内部更新使用的 npm r
 
 ```bash
 npm run update:check         # 查看 npm 上的 latest / next / alpha
-npm run update               # 升级到 next（默认，跟踪 GitHub 最新 release）
-npm run update:latest        # 升级到 npm latest（当前仍为 0.2.2-rc.1）
+npm run update               # 升级到 npm latest（官方稳定通道）
+npm run update:next          # 仅在明确要测试 next 预览通道时使用
 ./bin/dsh --version          # 验证
 ```
 
-- 当前上游的 GitHub release 已到 `0.2.3-alpha.2`，但 npm `latest` 标签仍停在
-  `0.2.2-rc.1`；因此本项目默认跟踪 `next`。只有需要回退到 npm `latest` 时才用
-  `npm run update:latest`。
+- 本项目默认跟踪 npm `latest` 稳定通道；当前稳定版为 `0.2.2-rc.5`。`alpha` / `beta`
+  预览版不会自动采用，需要测试时使用 `npm run update:next` 或其他显式命令。
 - 升级会改写 `package.json` 中的精确版本，`package-lock.json` 保证可复现。
 - 应用版本与内置 dsh 版本保持一致。手动升级 dsh 后执行
   `npm version "$(./bin/dsh --version)" --no-git-tag-version`；Actions 工作流会自动完成这一步。
@@ -246,10 +244,9 @@ npm run update:latest        # 升级到 npm latest（当前仍为 0.2.2-rc.1）
 ## GitHub Actions 自动更新与发布
 
 [`.github/workflows/update-dsh.yml`](.github/workflows/update-dsh.yml) 每小时检查一次
-[`deepseek-ai/deepseek-harness`](https://github.com/deepseek-ai/deepseek-harness) 的
-`dsh-v*` release。发现新 dsh 版本时自动：
+npm 的 `latest` 稳定通道（`@deepseek-ai/dsh@latest`），不扫描 alpha/beta 预发布。发现新稳定版本时自动：
 
-1. 确认 npm 上存在对应版本的 `@deepseek-ai/dsh`；
+1. 确认 npm 上存在对应版本的 `@deepseek-ai/dsh`，并拒绝 alpha/beta 版本；
 2. 把 `package.json` / `package-lock.json` 的应用版本对齐到该 dsh 版本；
 3. 更新 README 中的 dsh 版本和 AppImage 文件名；
 4. 重新安装依赖并执行 `npm run appimage`；
@@ -258,15 +255,16 @@ npm run update:latest        # 升级到 npm latest（当前仍为 0.2.2-rc.1）
 7. 创建或更新标签为 `dsh-v<version>` 的 GitHub Release，上传 AppImage 和 `.sha256`。
 
 版本规则：客户端版本 = 内置 dsh 版本 = Release 标签去掉 `dsh-v` 前缀。例如官方
-`dsh-v0.2.3-alpha.2` 对应客户端 `0.2.3-alpha.2`、AppImage
-`DeepSeek-Harness-0.2.3-alpha.2-x86_64.AppImage` 和 GitHub Release 标签 `dsh-v0.2.3-alpha.2`。
-Release 标题为 `DeepSeek Harness 0.2.3-alpha.2`，不再有独立的客户端版本号。客户端更新器
+`dsh-v0.2.2-rc.5` 对应客户端 `0.2.2-rc.5`、AppImage
+`DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage` 和 GitHub Release 标签 `dsh-v0.2.2-rc.5`。
+Release 标题为 `DeepSeek Harness 0.2.2-rc.5`，不再有独立的客户端版本号。客户端更新器
 只识别 `dsh-v*` 标签。
 
 也可以在 Actions 页面手动触发 **Update dsh and release AppImage**：
 
-- `version` 留空：自动选择官方最新 release；
-- 指定 `version`：构建并发布指定 dsh 版本，例如 `0.2.3-alpha.2`；
+- `version` 留空：自动选择 npm `latest` 稳定版本；
+- 指定 `version`：构建并发布指定稳定版本（`-rc.N` 或正式版），例如 `0.2.2-rc.5`；
+  alpha/beta 版本会被直接拒绝；
 - `force`：即使版本未变化也重新构建，并覆盖已有 Release 附件。
 
 也可以用 `repository_dispatch` 触发（只需要 `Contents: write` 权限）：
@@ -295,7 +293,7 @@ dsh 插件按 profile 隔离。命令会转发给 pnpm，在对应 profile 目�
 ./bin/dsh plugin --profile web outdated        # 可升级的依赖
 
 # 安装 / 升级到指定版本（推荐显式写版本）
-./bin/dsh plugin --profile web add @deepseek-ai/dsh-experimental-plugin-market-bundle@0.2.3-alpha.2
+./bin/dsh plugin --profile web add @deepseek-ai/dsh-experimental-plugin-market-bundle@0.2.2-rc.5
 
 # 移除
 ./bin/dsh plugin --profile web remove <package>
@@ -307,11 +305,11 @@ npm run plugin -- --profile web list
 ### 版本必须与 dsh 匹配
 
 不少官方插件包的 npm `latest` 标签还停在 `0.0.1-rc.x` / `0.1.0-rc.x`，与本机
-`dsh 0.2.3-alpha.2` 不兼容，直接 `add <pkg>` 会被拒绝。请先查标签，再显式安装同一代的版本：
+`dsh 0.2.2-rc.5` 不兼容，直接 `add <pkg>` 会被拒绝。请先查标签，再显式安装同一代的版本：
 
 ```bash
 npm view @deepseek-ai/<plugin> dist-tags --json
-./bin/dsh plugin --profile web add @deepseek-ai/<plugin>@0.2.3-alpha.2
+./bin/dsh plugin --profile web add @deepseek-ai/<plugin>@0.2.2-rc.5
 ```
 
 ### bundle 插件 vs 普通插件
@@ -339,7 +337,7 @@ Web 端也可以直接在侧边栏 **Plugins** 页面启用/禁用插件和 bund
 
 ```bash
 ./bin/dsh plugin --profile web allow-version <pkg>@<version> \
-  --dsh-version 0.2.3-alpha.2 --accept-risk
+  --dsh-version 0.2.2-rc.5 --accept-risk
 ```
 
 豁免只对“精确包版本 + 精确 dsh 版本”有效，升级 dsh 或插件后需要重新授权。
@@ -365,7 +363,7 @@ DSH_HOME="$PWD/.dsh" ./bin/dsh web
 
 ## 安装时做了什么
 
-1. `npm install -D` 安装 `@deepseek-ai/dsh@0.2.3-alpha.2`、`pnpm@12.21.0`、`electron@45.3.2`
+1. `npm install -D` 安装 `@deepseek-ai/dsh@0.2.2-rc.5`、`pnpm@12.21.0`、`electron@45.3.2`
    和 `electron-builder@26.18.0`（本地，未污染全局）。
 2. 用 `npm install-scripts approve` 放行依赖的安装脚本（`allowScripts` 已写入 `package.json`）。
 3. 配置 Electron SUID sandbox，并安装应用菜单入口 `~/.local/share/applications/deepseek-harness.desktop`。

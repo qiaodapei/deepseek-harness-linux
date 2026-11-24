@@ -102,7 +102,7 @@ npm run appimage
 产物：
 
 ```text
-dist-desktop/DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage   # 约 360 MB
+dist-desktop/DeepSeek-Harness-0.2.2-rc.5-x86_64.AppImage   # 约 356 MB
 ```
 
 直接运行（或 chmod 后在文件管理器双击）：

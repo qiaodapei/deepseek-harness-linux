@@ -355,6 +355,21 @@ try {
   const removed = await pruneRuntimeVersions(dataDir, ['0.2.2-rc.5'])
   assert.deepEqual(removed, ['0.2.2-rc.4'])
   assert.equal(resolveActiveRuntime({ bundledRoot, dataDir }).version, '0.2.2-rc.5')
+
+  // A stable AppImage must ignore a preview runtime left by an older client.
+  // This is the shell-rollback case: the managed alpha sorts higher by semver,
+  // but selecting it would make About report the preview dsh again.
+  await fakeRuntime('0.2.3-alpha.2')
+  await activateRuntime(dataDir, '0.2.3-alpha.2')
+  resolved = resolveActiveRuntime({ bundledRoot, dataDir })
+  assert.equal(resolved.source, 'bundled')
+  assert.equal(resolved.version, '0.2.2-rc.3')
+
+  // A normal stable managed runtime still takes precedence afterwards.
+  await activateRuntime(dataDir, '0.2.2-rc.5')
+  resolved = resolveActiveRuntime({ bundledRoot, dataDir })
+  assert.equal(resolved.source, 'managed')
+  assert.equal(resolved.version, '0.2.2-rc.5')
 } finally {
   await rm(root, { recursive: true, force: true })
 }

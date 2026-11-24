@@ -188,6 +188,8 @@ AppImage 启动约 15 秒后检查 GitHub Releases 的 `dsh-v*` 标签和 npm �
 - 更新器逻辑有独立测试：`npm run test:updater`。
 - 版本检测只使用 npm 的 `latest` 稳定通道（允许 `-rc.N` 和正式版，排除 `alpha` / `beta`）；
   `next` / `beta` / `alpha` 不会被自动采用。
+- 从预览版 AppImage 回退到稳定版时，稳定版客户端也会忽略 `runtime/current` 指向的
+  alpha/beta runtime，自动使用内置稳定 dsh；不需要手动删除 `~/.local/share/deepseek-harness/runtime/`。
 - 因为客户端壳版本跟随发布时的 dsh，内部更新只升级 dsh，不会改变壳版本；壳层修复仍通过完整
   AppImage 发布。覆盖同一版本的 Release 后，已安装同版本的用户不会收到自动更新提示。
 - 从旧的 `1.0.0` / `1.1.0` 客户端迁移时，需要手动安装一次 `0.2.2-rc.5`：旧版本号高于

@@ -10,7 +10,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { chmod, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { compareVersions } from './updater.mjs'
+import { compareVersions, isStableChannelVersion } from './updater.mjs'
 
 export const DEFAULT_REGISTRY = 'https://registry.npmmirror.com'
 export const FALLBACK_REGISTRY = 'https://registry.npmjs.org'
@@ -87,6 +87,12 @@ export function resolveActiveRuntime({ bundledRoot, dataDir }) {
     const root = realpathSync(layout.current)
     if (!isValidRuntime(root)) return bundled
     const version = readDshVersion(root)
+    // Rolling back to a stable AppImage must also roll back the dsh runtime.
+    // Older clients could leave `current` pointing at an alpha/beta runtime;
+    // never reactivate it from a stable-channel AppImage.
+    if (isStableChannelVersion(bundledVersion) && !isStableChannelVersion(version)) {
+      return bundled
+    }
     // A freshly installed AppImage may bundle a newer dsh than the managed
     // runtime. In that case the bundled copy wins.
     if (bundledVersion && version) {
